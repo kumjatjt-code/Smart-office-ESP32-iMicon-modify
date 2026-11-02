@@ -8,11 +8,14 @@ const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/esp' });
 
 let relayStates = [false, false, false, false];
-let autoMode = false; // ปรับค่าเริ่มต้นเป็น false เพื่อให้ผู้ใช้เลือกเปิดเองได้
+// ตั้งค่าเริ่มต้นเป็น true เพื่อให้โหมดอัตโนมัติทำงานทันทีที่เปิดระบบ
+let autoMode = true; 
 
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ฟังก์ชันกระจายสถานะล่าสุดให้ทุก Client (รวมค่า autoMode ไปด้วย)
+// -------------------------------------------------------------------------
+// ฟังก์ชันกระจายสถานะล่าสุดให้ทุก Client (ESP32 และ Web Dashboard)
+// -------------------------------------------------------------------------
 function broadcastState() {
     const payload = JSON.stringify({
         type: 'INIT_STATE',
@@ -27,14 +30,16 @@ function broadcastState() {
     });
 }
 
-// ฟังก์ชันคำนวณเวลาอัตโนมัติ
+// -------------------------------------------------------------------------
+// ฟังก์ชันคำนวณเวลาประเทศไทย (UTC+7) และสลับการทำงานอัตโนมัติ
+// -------------------------------------------------------------------------
 function checkAutoSchedule() {
-    // หากปิดโหมด Auto ไว้ จะข้ามการทำงานทันที ปล่อยให้ควบคุมแบบ Manual อิสระ
+    // หากถูกสั่งปิดโหมด Auto จะไม่คำนวณทับการควบคุมแบบ Manual
     if (!autoMode) return;
 
     const now = new Date();
     const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-    const thTime = new Date(utc + (3600000 * 7)); // เวลาไทย (UTC+7)
+    const thTime = new Date(utc + (3600000 * 7)); // ปรับเวลาเป็นเวลาไทย (UTC+7)
 
     const hours = thTime.getHours();
     const minutes = thTime.getMinutes();
@@ -44,7 +49,7 @@ function checkAutoSchedule() {
     let air2 = false;
     let air3 = false;
 
-    // ช่วงเวลาทำงานอัตโนมัติ 08:00 - 16:00 น.
+    // ตารางเวลาทำงานสลับแอร์ (08:00 - 16:00 น.)
     if (totalMinutes >= 480 && totalMinutes < 510) {          // 08:00 - 08:30 [Air1]
         air1 = true;
     } else if (totalMinutes >= 510 && totalMinutes < 540) {   // 08:30 - 09:00 [Air2]
@@ -81,15 +86,16 @@ function checkAutoSchedule() {
     if (relayStates[2] !== air3) { relayStates[2] = air3; isChanged = true; }
 
     if (isChanged) {
+        console.log(`[Auto Schedule] ปรับตามตาราง: Air1=${air1}, Air2=${air2}, Air3=${air3}`);
         broadcastState();
     }
 }
 
-// ตรวจสอบเวลาทุกๆ 10 วินาที
+// ตรวจสอบตารางเวลาทุกๆ 10 วินาที
 setInterval(checkAutoSchedule, 10000);
 
 wss.on('connection', (ws) => {
-    // ส่งสถานะปัจจุบันให้ Client ทันทีที่เชื่อมต่อ
+    // ส่งสถานะปัจจุบันและ autoMode ให้ Client ทันทีที่เชื่อมต่อ
     ws.send(JSON.stringify({
         type: 'INIT_STATE',
         relays: relayStates,
@@ -107,7 +113,7 @@ wss.on('connection', (ws) => {
                     autoMode: autoMode
                 }));
             }
-            // สั่งเปิด-ปิดรายช่อง
+            // สั่งควบคุมรายช่อง (Manual)
             else if (data.type === 'CONTROL') {
                 const { ch, state } = data;
                 if (ch >= 0 && ch < 4) {
@@ -115,23 +121,23 @@ wss.on('connection', (ws) => {
                     broadcastState();
                 }
             }
-            // สั่งเปิด-ปิดทั้งหมด
+            // สั่งเปิด-ปิดทั้งหมด (Manual All)
             else if (data.type === 'CONTROL_ALL') {
                 for (let i = 0; i < 4; i++) {
                     relayStates[i] = data.state;
                 }
                 broadcastState();
             }
-            // สลับสถานะโหมด Auto ตามคำสั่งจากสวิตช์หน้าเว็บ
+            // สลับสถานะโหมด Auto (เปิด/ปิดตามคำสั่งจากสวิตช์หน้าเว็บ)
             else if (data.type === 'TOGGLE_AUTO') {
                 autoMode = Boolean(data.state);
-                console.log(`[Auto Schedule] เปลี่ยนเป็น: ${autoMode ? 'เปิดใช้งาน' : 'ปิดใช้งาน'}`);
+                console.log(`[Auto Schedule] สลับสถานะเป็น: ${autoMode ? 'เปิดทำงาน' : 'ปิดทำงาน'}`);
                 if (autoMode) {
                     checkAutoSchedule(); // คำนวณเวลาทันทีที่เปิดสวิตช์
                 }
-                broadcastState(); // ส่งสถานะไปอัปเดตหน้าจอทุกเครื่อง
+                broadcastState();
             }
-            // ESP32 รายงานสถานะกลับมา
+            // ESP32 รายงานสถานะจริงกลับมา
             else if (data.type === 'STATE_UPDATE' && Array.isArray(data.relays)) {
                 if (data.relays.length === 4) {
                     relayStates = data.relays;
@@ -146,5 +152,7 @@ wss.on('connection', (ws) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
+    console.log(`🚀 Smart Office Server กำลังทำงานที่พอร์ต ${PORT}`);
+    // คำนวณสถานะเวลาอัตโนมัติรอบแรกทันทีตอนเปิดเซิร์ฟเวอร์
+    checkAutoSchedule();
 });
