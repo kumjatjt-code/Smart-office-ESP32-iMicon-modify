@@ -83,14 +83,14 @@
         </div>
       </div>
       
-      <!-- ป้ายสถานะการเชื่อมต่อ Server -->
+      <!-- ป้ายสถานะ -->
       <div id="statusBadge" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
         <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
         <span id="statusText">ออนไลน์</span>
       </div>
     </header>
 
-    <!-- นาฬิกาและสรุปจำนวนอุปกรณ์ที่เปิดทำงาน -->
+    <!-- นาฬิกาและสรุปอุปกรณ์ -->
     <div class="grid grid-cols-2 gap-3">
       <div class="glass-card rounded-xl p-3 flex items-center gap-3">
         <div class="w-8 h-8 rounded-lg bg-sky-500/10 flex items-center justify-center text-sky-400 text-sm">
@@ -112,7 +112,7 @@
       </div>
     </div>
 
-    <!-- การ์ดโหมดทำงานอัตโนมัติตามเวลา (Auto Schedule) -->
+    <!-- โหมดอัตโนมัติ -->
     <div class="glass-card rounded-2xl p-4 border-l-4 border-l-sky-500 relative overflow-hidden">
       <div class="flex items-start justify-between gap-3">
         <div class="flex gap-3">
@@ -127,7 +127,6 @@
             </p>
           </div>
         </div>
-        <!-- สวิตช์สลับโหมด Auto Schedule -->
         <div class="relative inline-block w-12 align-middle select-none mt-1">
           <input type="checkbox" id="scheduleToggle" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-2 border-slate-700 appearance-none cursor-pointer focus:outline-none"/>
           <label for="scheduleToggle" class="toggle-label block overflow-hidden h-6 rounded-full bg-slate-700/80 cursor-pointer transition-colors duration-200"></label>
@@ -135,7 +134,7 @@
       </div>
     </div>
 
-    <!-- ปุ่มควบคุมทั้งหมด (Master Control Buttons) -->
+    <!-- ปุ่มเปิด/ปิดทั้งหมด -->
     <div class="grid grid-cols-2 gap-3">
       <button onclick="controlAll(true)" class="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-gradient-to-r from-teal-500 to-emerald-600 hover:from-teal-400 hover:to-emerald-500 active:scale-[0.98] transition-all text-white font-medium text-xs shadow-lg shadow-emerald-900/30">
         <i class="fa-solid fa-power-off"></i>
@@ -147,38 +146,156 @@
       </button>
     </div>
 
-    <!-- รายการสวิตช์ควบคุม Relay ทั้ง 4 ช่อง -->
+    <!-- รายการควบคุม Relay ทั้ง 4 ช่อง -->
     <div class="flex flex-col gap-3" id="relaysContainer">
-      <!-- ข้อมูลการ์ดอุปกรณ์จะถูกแสดงผลผ่าน JavaScript -->
+      <!-- การ์ดจะถูกเรนเดอร์ผ่าน JS -->
     </div>
 
   </div>
 
   <script>
-    // การตั้งค่า WebSocket URL (รองรับทั้ง http/https และ ws/wss)
     const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/esp';
     let socket;
 
-    // ข้อมูลอุปกรณ์ประจำ Relay Pins [26, 25, 33, 32]
+    // ข้อมูลอุปกรณ์ 4 ช่อง พร้อมค่าตัวคูณพลังงาน (multiplier)
     const devices = [
-      { name: "Air Conditioner 1", desc: "25,000 BTU • ห้องประชุมหลัก", icon: "fa-snowflake" },
-      { name: "Air Conditioner 2", desc: "25,000 BTU • โซนสำนักงาน A", icon: "fa-snowflake" },
-      { name: "Air Conditioner 3", desc: "25,000 BTU • โซนสำนักงาน B", icon: "fa-snowflake" },
-      { name: "Office Ventilation / Light", desc: "ระบบระบายอากาศ & ปั๊มน้ำ", icon: "fa-fan" }
+      { 
+        name: "Air Conditioner 1", 
+        desc: "25,000 Btu. 1 เฟส อาคารรับสมัคร", 
+        icon: "fa-snowflake", 
+        trackTime: true, 
+        multiplier: 2.0 
+      },
+      { 
+        name: "Air Conditioner 2", 
+        desc: "25,000 Btu. 1 เฟส อาคารรับสมัคร", 
+        icon: "fa-snowflake", 
+        trackTime: true, 
+        multiplier: 2.0 
+      },
+      { 
+        name: "Air Conditioner 3", 
+        desc: "53,000 Btu. 3 เฟส อาคารรับสมัคร", 
+        icon: "fa-snowflake", 
+        trackTime: true, 
+        multiplier: 4.5 
+      },
+      { 
+        name: "Office Ventilation / Light", 
+        desc: "ระบบระบายอากาศ & ปั๊มน้ำ", 
+        icon: "fa-fan", 
+        trackTime: false, 
+        multiplier: 0.0 
+      }
     ];
 
     let relayStates = [false, false, false, false];
+    let deviceTotalSeconds = [0, 0, 0, 0];
+    let deviceOnSince = [null, null, null, null];
 
-    // อัปเดตเวลานาฬิกาแบบ Real-time
+    // คำนวณคีย์รอบวันทำงาน โดยตัดรอบใหม่ทุกเวลา 08:00 น.
+    function getOperationalDayKey() {
+      const now = new Date();
+      const d = new Date(now.getTime());
+      // หากเวลาก่อน 08:00 น. จะนับเป็นรอบของเมื่อวาน
+      if (d.getHours() < 8) {
+        d.setDate(d.getDate() - 1);
+      }
+      return `smart_office_cycle_${d.getFullYear()}_${d.getMonth() + 1}_${d.getDate()}`;
+    }
+
+    // โหลดและตรวจเช็กรอบวัน (Daily Reset)
+    function checkAndResetDailyCycle() {
+      const currentKey = getOperationalDayKey();
+      const savedKey = localStorage.getItem('smart_office_active_cycle');
+
+      if (savedKey !== currentKey) {
+        // ขึ้นรอบวันใหม่ (หลัง 08:00 น.) ล้างค่านับใหม่ทั้งหมด
+        deviceTotalSeconds = [0, 0, 0, 0];
+        localStorage.setItem('smart_office_active_cycle', currentKey);
+        localStorage.setItem('smart_office_seconds', JSON.stringify(deviceTotalSeconds));
+      } else {
+        // อยู่ในรอบวันเดิม โหลดค่าวินาทีสะสมเดิมมาใช้งานต่อ
+        const savedData = localStorage.getItem('smart_office_seconds');
+        if (savedData) {
+          try {
+            deviceTotalSeconds = JSON.parse(savedData);
+          } catch(e) {
+            deviceTotalSeconds = [0, 0, 0, 0];
+          }
+        }
+      }
+    }
+
+    checkAndResetDailyCycle();
+
+    // บันทึกวินาทีสะสมลง localStorage เพื่อป้องกันค่าหายเมื่อปิดหรือรีเฟรชหน้าเว็บ
+    function saveTotalSeconds() {
+      localStorage.setItem('smart_office_seconds', JSON.stringify(deviceTotalSeconds));
+    }
+
     function updateClock() {
       const now = new Date();
       const timeStr = now.toLocaleTimeString('th-TH', { hour12: false });
       document.getElementById('liveClock').textContent = timeStr + ' น.';
+      
+      // ตรวจสอบการข้ามเวลา 08:00 น. ระหว่างที่เปิดหน้าเว็บทิ้งไว้
+      checkAndResetDailyCycle();
     }
-    setInterval(updateClock, 1000);
+
+    // จัดการบันทึกเวลาเมื่อสถานะเปิด/ปิดเปลี่ยนไป
+    function updateStateTracking(newStates) {
+      for (let i = 0; i < 4; i++) {
+        if (newStates[i] !== relayStates[i]) {
+          if (newStates[i] === true) {
+            deviceOnSince[i] = Date.now();
+          } else {
+            if (deviceOnSince[i]) {
+              deviceTotalSeconds[i] += (Date.now() - deviceOnSince[i]) / 1000;
+              deviceOnSince[i] = null;
+              saveTotalSeconds();
+            }
+          }
+        }
+      }
+      relayStates = [...newStates];
+    }
+
+    // คำนวณชั่วโมงและพลังงานแบบเรียลไทม์
+    function getDeviceStats(idx) {
+      let totalSecs = deviceTotalSeconds[idx] || 0;
+      if (relayStates[idx] && deviceOnSince[idx]) {
+        totalSecs += (Date.now() - deviceOnSince[idx]) / 1000;
+      }
+      const hours = totalSecs / 3600;
+      const energy = hours * devices[idx].multiplier;
+      return { 
+        hours: hours.toFixed(4), 
+        energy: energy.toFixed(4) 
+      };
+    }
+
+    // อัปเดตตัวเลขแสดงผลบนหน้าจอทุกวินาที
+    function updateLiveStatsUI() {
+      for (let i = 0; i < 4; i++) {
+        if (devices[i].trackTime) {
+          const stats = getDeviceStats(i);
+          const timeEl = document.getElementById(`time_${i}`);
+          const energyEl = document.getElementById(`energy_${i}`);
+          if (timeEl && energyEl) {
+            timeEl.textContent = stats.hours;
+            energyEl.textContent = stats.energy;
+          }
+        }
+      }
+    }
+
+    setInterval(() => {
+      updateClock();
+      updateLiveStatsUI();
+    }, 1000);
     updateClock();
 
-    // แสดงผลรายการการ์ดอุปกรณ์
     function renderCards() {
       const container = document.getElementById('relaysContainer');
       container.innerHTML = '';
@@ -187,9 +304,12 @@
       devices.forEach((dev, idx) => {
         const isOn = relayStates[idx];
         if (isOn) activeCount++;
+        
+        const stats = getDeviceStats(idx);
 
         const card = document.createElement('div');
         card.className = `glass-card rounded-2xl p-4 transition-all duration-300 relative ${isOn ? 'border-sky-500/40 glow-cyan' : 'border-white/5 opacity-85'}`;
+        
         card.innerHTML = `
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-3.5">
@@ -212,6 +332,19 @@
               <label for="switch_${idx}" class="toggle-label block overflow-hidden h-6 rounded-full bg-slate-700 cursor-pointer transition-colors duration-200"></label>
             </div>
           </div>
+          
+          ${dev.trackTime ? `
+            <div class="mt-4 pt-3 border-t border-white/10 grid grid-cols-2 gap-3 text-center">
+              <div class="bg-slate-800/40 rounded-lg p-2 border border-slate-700/50">
+                <div class="text-[10px] text-slate-400 mb-0.5">ชั่วโมงการทำงาน/วัน</div>
+                <div class="text-xs font-semibold text-sky-400"><span id="time_${idx}">${stats.hours}</span> ชม.</div>
+              </div>
+              <div class="bg-slate-800/40 rounded-lg p-2 border border-slate-700/50">
+                <div class="text-[10px] text-slate-400 mb-0.5">พลังงานใช้ไป</div>
+                <div class="text-xs font-semibold text-emerald-400"><span id="energy_${idx}">${stats.energy}</span> หน่วย</div>
+              </div>
+            </div>
+          ` : ''}
         `;
         container.appendChild(card);
       });
@@ -219,32 +352,28 @@
       document.getElementById('activeCount').textContent = `${activeCount} / ${devices.length} เครื่อง`;
     }
 
-    // เชื่อมต่อ WebSocket กับ Server
     function initWebSocket() {
       try {
         socket = new WebSocket(wsUrl);
 
         socket.onopen = () => {
           updateBadge(true);
-          // ส่งคำขอรับสถานะล่าสุดและโหมด Auto ทันทีเมื่อต่อติด
           socket.send(JSON.stringify({ type: "GET_STATE" }));
         };
 
         socket.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-
-            // 1. ซิงค์สถานะสวิตช์โหมด Auto จาก Server
             if (typeof data.autoMode === 'boolean') {
               document.getElementById('scheduleToggle').checked = data.autoMode;
             }
-
-            // 2. ซิงค์สถานะ Relay ทั้งหมด
             if (data.relays && Array.isArray(data.relays)) {
-              relayStates = data.relays;
+              updateStateTracking(data.relays);
               renderCards();
             } else if (data.type === "CONTROL" && typeof data.ch === 'number') {
-              relayStates[data.ch] = data.state;
+              let tempStates = [...relayStates];
+              tempStates[data.ch] = data.state;
+              updateStateTracking(tempStates);
               renderCards();
             }
           } catch (e) {
@@ -256,17 +385,13 @@
           updateBadge(false);
           setTimeout(initWebSocket, 3000);
         };
-
-        socket.onerror = () => {
-          socket.close();
-        };
+        socket.onerror = () => { socket.close(); };
       } catch (err) {
         updateBadge(false);
         setTimeout(initWebSocket, 3000);
       }
     }
 
-    // เปลี่ยนป้ายสถานะออนไลน์/ออฟไลน์
     function updateBadge(connected) {
       const badge = document.getElementById('statusBadge');
       const text = document.getElementById('statusText');
@@ -281,35 +406,33 @@
       }
     }
 
-    // สั่งควบคุมรายช่อง (Manual Control)
     function toggleRelay(ch, state) {
-      relayStates[ch] = state;
+      let tempStates = [...relayStates];
+      tempStates[ch] = state;
+      updateStateTracking(tempStates);
       renderCards();
+      
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "CONTROL", ch: ch, state: state }));
       }
     }
 
-    // สั่งเปิด-ปิดทั้งหมด (Manual All)
     function controlAll(state) {
-      for (let i = 0; i < relayStates.length; i++) relayStates[i] = state;
+      let tempStates = [state, state, state, state];
+      updateStateTracking(tempStates);
       renderCards();
+      
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "CONTROL_ALL", state: state }));
       }
     }
 
-    // ส่งคำสั่งเปิด/ปิดโหมด Auto Schedule ไปยัง Server
     document.getElementById('scheduleToggle').addEventListener('change', function() {
       if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({
-          type: "TOGGLE_AUTO",
-          state: this.checked
-        }));
+        socket.send(JSON.stringify({ type: "TOGGLE_AUTO", state: this.checked }));
       }
     });
 
-    // เริ่มต้นระบบ
     renderCards();
     initWebSocket();
   </script>
