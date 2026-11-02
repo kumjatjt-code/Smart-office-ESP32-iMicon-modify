@@ -83,10 +83,10 @@
         </div>
       </div>
       
-      <!-- ป้ายสถานะ -->
-      <div id="statusBadge" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-        <span id="statusText">ออนไลน์</span>
+      <!-- ป้ายสถานะออนไลน์/ออฟไลน์ -->
+      <div id="statusBadge" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">
+        <span class="w-2 h-2 rounded-full bg-rose-400"></span>
+        <span id="statusText">กำลังเชื่อมต่อ...</span>
       </div>
     </header>
 
@@ -123,7 +123,7 @@
             <h2 class="text-sm font-semibold text-white leading-tight">โหมดทำงานอัตโนมัติตามเวลา (Auto Schedule)</h2>
             <p class="text-xs text-slate-400 mt-1 leading-relaxed">
               เปิด-ปิด Air 1, Air 2, Air 3 อัตโนมัติ<br>
-              <span class="text-sky-300 font-medium">ช่วงเวลา 08:00 - 16:00 น.</span>
+              <span class="text-sky-300 font-medium">ช่วงเวลา 08:00 - 16:00 น. (รีเซ็ต 07:50 น.)</span>
             </p>
           </div>
         </div>
@@ -148,16 +148,17 @@
 
     <!-- รายการควบคุม Relay ทั้ง 4 ช่อง -->
     <div class="flex flex-col gap-3" id="relaysContainer">
-      <!-- การ์ดจะถูกเรนเดอร์ผ่าน JS -->
+      <!-- การ์ดอุปกรณ์จะถูกเรนเดอร์ผ่าน JS -->
     </div>
 
   </div>
 
   <script>
     const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/esp';
-    let socket;
+    let socket = null;
+    let isWsConnected = false;
 
-    // ข้อมูลอุปกรณ์ 4 ช่อง พร้อมค่าตัวคูณพลังงาน
+    // ข้อมูลอุปกรณ์และตัวคูณคำนวณพลังงาน
     const devices = [
       { 
         name: "Air Conditioner 1", 
@@ -189,29 +190,35 @@
       }
     ];
 
+    // สถานะจริงของรีเลย์ที่ได้รับยืนยันจากบอร์ด ESP32
     let relayStates = [false, false, false, false];
     let deviceTotalSeconds = [0, 0, 0, 0];
-    let deviceOnSince = [null, null, null, null];
+    let lastTickTimestamp = Date.now();
 
-    // คำนวณคีย์รอบวันทำงาน โดยตัดรอบใหม่ทุกเวลา 08:00 น.
-    function getOperationalDayKey() {
-      const now = new Date();
+    // -------------------------------------------------------------
+    // ฟังก์ชันคำนวณรอบวัน โดยตัดรอบใหม่ที่เวลา 07:50 น.
+    // -------------------------------------------------------------
+    function getOperationalDayKey(now) {
       const d = new Date(now.getTime());
-      if (d.getHours() < 8) {
+      const totalMinutes = d.getHours() * 60 + d.getMinutes();
+      // หากเวลาก่อน 07:50 น. (470 นาที) จะนับเป็นรอบของเมื่อวาน
+      if (totalMinutes < 470) {
         d.setDate(d.getDate() - 1);
       }
       return `smart_office_cycle_${d.getFullYear()}_${d.getMonth() + 1}_${d.getDate()}`;
     }
 
-    // ตรวจสอบและตัดรอบวันใหม่ (Daily Reset)
-    function checkAndResetDailyCycle() {
-      const currentKey = getOperationalDayKey();
+    // ตรวจสอบและรีเซ็ตค่าเป็น 0 อัตโนมัติเมื่อถึง 07:50 น.
+    function checkAndResetDailyCycle(now) {
+      const currentKey = getOperationalDayKey(now);
       const savedKey = localStorage.getItem('smart_office_active_cycle');
 
       if (savedKey !== currentKey) {
+        // ถึงเวลา 07:50 น. ของวันใหม่ -> รีเซ็ตเวลาและพลังงานเป็น 0 ทันที
         deviceTotalSeconds = [0, 0, 0, 0];
         localStorage.setItem('smart_office_active_cycle', currentKey);
         localStorage.setItem('smart_office_seconds', JSON.stringify(deviceTotalSeconds));
+        renderCards();
       } else {
         const savedData = localStorage.getItem('smart_office_seconds');
         if (savedData) {
@@ -224,60 +231,50 @@
       }
     }
 
-    checkAndResetDailyCycle();
-
+    // บันทึกค่าวินาทีสะสมลง LocalStorage
     function saveTotalSeconds() {
       localStorage.setItem('smart_office_seconds', JSON.stringify(deviceTotalSeconds));
     }
 
-    function updateClock() {
-      const now = new Date();
-      const timeStr = now.toLocaleTimeString('th-TH', { hour12: false });
-      document.getElementById('liveClock').textContent = timeStr + ' น.';
-      checkAndResetDailyCycle();
+    // -------------------------------------------------------------
+    // ฟังก์ชันคำนวณเฉพาะช่วงเวลาทำงาน (08:00 - 16:00 น.)
+    // -------------------------------------------------------------
+    function getWorkingSecondsBetween(startMs, endMs) {
+      if (startMs >= endMs) return 0;
+      const startDate = new Date(startMs);
+      const endDate = new Date(endMs);
+
+      // วินาทีนับจากเที่ยงคืนของเวลาเริ่มต้นและสิ้นสุด
+      const startSec = startDate.getHours() * 3600 + startDate.getMinutes() * 60 + startDate.getSeconds() + startDate.getMilliseconds() / 1000;
+      const endSec = endDate.getHours() * 3600 + endDate.getMinutes() * 60 + endDate.getSeconds() + endDate.getMilliseconds() / 1000;
+
+      // ขอบเขตช่วงเวลา 08:00:00 (28,800 วิ) ถึง 16:00:00 (57,600 วิ)
+      const windowStart = 8 * 3600;
+      const windowEnd = 16 * 3600;
+
+      // หาจุดตัดที่อยู่ในช่วงเวลา 08:00 - 16:00 เท่านั้น
+      const overlapStart = Math.max(startSec, windowStart);
+      const overlapEnd = Math.min(endSec, windowEnd);
+
+      // หลัง 16:00 หรือก่อน 08:00 จะคืนค่า 0 (ไม่นับเวลาและพลังงานเพิ่ม)
+      return overlapEnd > overlapStart ? (overlapEnd - overlapStart) : 0;
     }
 
-    function updateStateTracking(newStates) {
-      for (let i = 0; i < 4; i++) {
-        if (newStates[i] !== relayStates[i]) {
-          if (newStates[i] === true) {
-            deviceOnSince[i] = Date.now();
-          } else {
-            if (deviceOnSince[i]) {
-              deviceTotalSeconds[i] += (Date.now() - deviceOnSince[i]) / 1000;
-              deviceOnSince[i] = null;
-              saveTotalSeconds();
-            }
-          }
-        }
-      }
-      relayStates = [...newStates];
-    }
-
-    // คำนวณเวลาและจัดช่องไฟตัวเลขให้เว้นระยะกำลังพอดี
+    // คำนวณรูปแบบเวลาและพลังงานสะสม
     function getDeviceStats(idx) {
-      let totalSecs = Math.floor(deviceTotalSeconds[idx] || 0);
-      if (relayStates[idx] && deviceOnSince[idx]) {
-        totalSecs += Math.floor((Date.now() - deviceOnSince[idx]) / 1000);
-      }
-      
+      const totalSecs = Math.floor(deviceTotalSeconds[idx] || 0);
       const h = String(Math.floor(totalSecs / 3600)).padStart(2, '0');
       const m = String(Math.floor((totalSecs % 3600) / 60)).padStart(2, '0');
       const s = String(Math.floor(totalSecs % 60)).padStart(2, '0');
 
-      // จัดวางตัวเลข ชั่วโมง : นาที : วินาที เว้นวรรคข้างละ 1 เคาะ
       const timeFormatted = `${h} : ${m} : ${s}`;
-      
       const fractionalHours = totalSecs / 3600;
       const energy = (fractionalHours * devices[idx].multiplier).toFixed(4);
 
-      return { 
-        timeFormatted: timeFormatted, 
-        energy: energy 
-      };
+      return { timeFormatted, energy };
     }
 
-    // อัปเดตตัวเลขแสดงผลทุกวินาที
+    // อัปเดตตัวเลขแสดงผลบนหน้าจอ
     function updateLiveStatsUI() {
       for (let i = 0; i < 4; i++) {
         if (devices[i].trackTime) {
@@ -292,12 +289,51 @@
       }
     }
 
-    setInterval(() => {
-      updateClock();
-      updateLiveStatsUI();
-    }, 1000);
-    updateClock();
+    // -------------------------------------------------------------
+    // ลูปหลักทำงานทุก 1 วินาที (Heartbeat Ticker)
+    // -------------------------------------------------------------
+    function mainTicker() {
+      const now = new Date();
+      const nowMs = now.getTime();
 
+      // ตรวจสอบการรีเซ็ต 07:50 น.
+      checkAndResetDailyCycle(now);
+
+      // คำนวณวินาทีที่ผ่านไปเฉพาะในช่วง 08:00 - 16:00 น.
+      const workingSec = getWorkingSecondsBetween(lastTickTimestamp, nowMs);
+      lastTickTimestamp = nowMs;
+
+      // เริ่มคิดเวลาและพลังงานก็ต่อเมื่อ:
+      // 1. อยู่ในช่วง 08:00 - 16:00 น. (workingSec > 0)
+      // 2. มีการเชื่อมต่อกับระบบจริง (isWsConnected)
+      // 3. บอร์ด ESP32 ยืนยันว่ารีเลย์ต่อวงจรทำงานแล้วเท่านั้น (relayStates[i] === true)
+      if (isWsConnected && workingSec > 0) {
+        let hasChanged = false;
+        for (let i = 0; i < 4; i++) {
+          if (devices[i].trackTime && relayStates[i] === true) {
+            deviceTotalSeconds[i] += workingSec;
+            hasChanged = true;
+          }
+        }
+        if (hasChanged) {
+          saveTotalSeconds();
+        }
+      }
+
+      // แสดงเวลาปัจจุบัน
+      const timeStr = now.toLocaleTimeString('th-TH', { hour12: false });
+      document.getElementById('liveClock').textContent = timeStr + ' น.';
+
+      updateLiveStatsUI();
+    }
+
+    // เริ่มต้นตัวตรวจจับเวลา
+    checkAndResetDailyCycle(new Date());
+    setInterval(mainTicker, 1000);
+
+    // -------------------------------------------------------------
+    // การแสดงผลการ์ดอุปกรณ์ (UI Render)
+    // -------------------------------------------------------------
     function renderCards() {
       const container = document.getElementById('relaysContainer');
       container.innerHTML = '';
@@ -358,28 +394,34 @@
       document.getElementById('activeCount').textContent = `${activeCount} / ${devices.length} เครื่อง`;
     }
 
+    // -------------------------------------------------------------
+    // ระบบเชื่อมต่อ WebSocket
+    // -------------------------------------------------------------
     function initWebSocket() {
       try {
         socket = new WebSocket(wsUrl);
 
         socket.onopen = () => {
+          isWsConnected = true;
           updateBadge(true);
+          // ขอสถานะล่าสุดจาก Server
           socket.send(JSON.stringify({ type: "GET_STATE" }));
         };
 
         socket.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
+
             if (typeof data.autoMode === 'boolean') {
               document.getElementById('scheduleToggle').checked = data.autoMode;
             }
+
+            // รับสถานะรีเลย์จริงจาก ESP32 / Server เพื่อสั่งเรนเดอร์และนับเวลา
             if (data.relays && Array.isArray(data.relays)) {
-              updateStateTracking(data.relays);
+              relayStates = data.relays;
               renderCards();
             } else if (data.type === "CONTROL" && typeof data.ch === 'number') {
-              let tempStates = [...relayStates];
-              tempStates[data.ch] = data.state;
-              updateStateTracking(tempStates);
+              relayStates[data.ch] = data.state;
               renderCards();
             }
           } catch (e) {
@@ -388,11 +430,17 @@
         };
 
         socket.onclose = () => {
+          isWsConnected = false;
           updateBadge(false);
           setTimeout(initWebSocket, 3000);
         };
-        socket.onerror = () => { socket.close(); };
+
+        socket.onerror = () => {
+          isWsConnected = false;
+          socket.close();
+        };
       } catch (err) {
+        isWsConnected = false;
         updateBadge(false);
         setTimeout(initWebSocket, 3000);
       }
@@ -412,22 +460,19 @@
       }
     }
 
+    // -------------------------------------------------------------
+    // ฟังก์ชันสั่งการ (ส่งคำสั่งไปยัง ESP32 ไม่นับเวลาก่อนได้รับการยืนยัน)
+    // -------------------------------------------------------------
     function toggleRelay(ch, state) {
-      let tempStates = [...relayStates];
-      tempStates[ch] = state;
-      updateStateTracking(tempStates);
-      renderCards();
-      
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "CONTROL", ch: ch, state: state }));
+      } else {
+        // หากออฟไลน์อยู่ ให้ดึงสวิตช์กลับค่าเดิม
+        renderCards();
       }
     }
 
     function controlAll(state) {
-      let tempStates = [state, state, state, state];
-      updateStateTracking(tempStates);
-      renderCards();
-      
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "CONTROL_ALL", state: state }));
       }
