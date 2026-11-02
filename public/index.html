@@ -254,21 +254,20 @@
       relayStates = [...newStates];
     }
 
-    // คำนวณเวลาให้อยู่ในรูปแบบ ชั่วโมง : นาที : วินาที (HH : MM : SS)
+    // คำนวณเวลาและจัดช่องไฟให้อ่านง่าย โปร่งขึ้น (ชิดกันน้อยลง)
     function getDeviceStats(idx) {
       let totalSecs = Math.floor(deviceTotalSeconds[idx] || 0);
       if (relayStates[idx] && deviceOnSince[idx]) {
         totalSecs += Math.floor((Date.now() - deviceOnSince[idx]) / 1000);
       }
       
-      // แปลงวินาทีเป็น ชั่วโมง นาที และวินาที
-      const h = Math.floor(totalSecs / 3600);
-      const m = Math.floor((totalSecs % 3600) / 60);
-      const s = Math.floor(totalSecs % 60);
+      const h = String(Math.floor(totalSecs / 3600)).padStart(2, '0');
+      const m = String(Math.floor((totalSecs % 3600) / 60)).padStart(2, '0');
+      const s = String(Math.floor(totalSecs % 60)).padStart(2, '0');
 
-      const timeFormatted = `${String(h).padStart(2, '0')} : ${String(m).padStart(2, '0')} : ${String(s).padStart(2, '0')}`;
+      // เว้นช่องไฟระหว่างตัวเลขและเครื่องหมายโคลอน ให้ตัวเลขไม่เบียดชิดกัน
+      const timeFormatted = `${h} : ${m} : ${s}`;
       
-      // คำนวณพลังงานสะสมจากชั่วโมงจริง
       const fractionalHours = totalSecs / 3600;
       const energy = (fractionalHours * devices[idx].multiplier).toFixed(4);
 
@@ -338,15 +337,15 @@
           
           ${dev.trackTime ? `
             <div class="mt-4 pt-3 border-t border-white/10 grid grid-cols-2 gap-3 text-center">
-              <div class="bg-slate-800/40 rounded-lg p-2 border border-slate-700/50">
-                <div class="text-[10px] text-slate-400 mb-0.5">เวลาทำงาน (ชม. : นาที : วิ.)</div>
-                <div class="text-xs font-semibold text-sky-400 font-mono tracking-wide">
+              <div class="bg-slate-800/40 rounded-lg p-2.5 border border-slate-700/50">
+                <div class="text-[10px] text-slate-400 mb-1">ชั่วโมง : นาที : วินาที (HH:MM:SS)</div>
+                <div class="text-xs font-semibold text-sky-400 font-mono tracking-widest">
                   <span id="time_${idx}">${stats.timeFormatted}</span>
                 </div>
               </div>
-              <div class="bg-slate-800/40 rounded-lg p-2 border border-slate-700/50">
-                <div class="text-[10px] text-slate-400 mb-0.5">พลังงานใช้ไป</div>
-                <div class="text-xs font-semibold text-emerald-400 font-mono">
+              <div class="bg-slate-800/40 rounded-lg p-2.5 border border-slate-700/50">
+                <div class="text-[10px] text-slate-400 mb-1">พลังงานใช้ไป</div>
+                <div class="text-xs font-semibold text-emerald-400 font-mono tracking-wider">
                   <span id="energy_${idx}">${stats.energy}</span> หน่วย
                 </div>
               </div>
