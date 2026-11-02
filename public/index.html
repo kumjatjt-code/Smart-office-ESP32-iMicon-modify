@@ -157,7 +157,7 @@
     const wsUrl = (window.location.protocol === 'https:' ? 'wss://' : 'ws://') + window.location.host + '/esp';
     let socket;
 
-    // ข้อมูลอุปกรณ์ 4 ช่อง พร้อมค่าตัวคูณพลังงาน (multiplier)
+    // ข้อมูลอุปกรณ์ 4 ช่อง พร้อมค่าตัวคูณพลังงาน
     const devices = [
       { 
         name: "Air Conditioner 1", 
@@ -197,25 +197,22 @@
     function getOperationalDayKey() {
       const now = new Date();
       const d = new Date(now.getTime());
-      // หากเวลาก่อน 08:00 น. จะนับเป็นรอบของเมื่อวาน
       if (d.getHours() < 8) {
         d.setDate(d.getDate() - 1);
       }
       return `smart_office_cycle_${d.getFullYear()}_${d.getMonth() + 1}_${d.getDate()}`;
     }
 
-    // โหลดและตรวจเช็กรอบวัน (Daily Reset)
+    // ตรวจสอบและตัดรอบวันใหม่ (Daily Reset)
     function checkAndResetDailyCycle() {
       const currentKey = getOperationalDayKey();
       const savedKey = localStorage.getItem('smart_office_active_cycle');
 
       if (savedKey !== currentKey) {
-        // ขึ้นรอบวันใหม่ (หลัง 08:00 น.) ล้างค่านับใหม่ทั้งหมด
         deviceTotalSeconds = [0, 0, 0, 0];
         localStorage.setItem('smart_office_active_cycle', currentKey);
         localStorage.setItem('smart_office_seconds', JSON.stringify(deviceTotalSeconds));
       } else {
-        // อยู่ในรอบวันเดิม โหลดค่าวินาทีสะสมเดิมมาใช้งานต่อ
         const savedData = localStorage.getItem('smart_office_seconds');
         if (savedData) {
           try {
@@ -229,7 +226,6 @@
 
     checkAndResetDailyCycle();
 
-    // บันทึกวินาทีสะสมลง localStorage เพื่อป้องกันค่าหายเมื่อปิดหรือรีเฟรชหน้าเว็บ
     function saveTotalSeconds() {
       localStorage.setItem('smart_office_seconds', JSON.stringify(deviceTotalSeconds));
     }
@@ -238,12 +234,9 @@
       const now = new Date();
       const timeStr = now.toLocaleTimeString('th-TH', { hour12: false });
       document.getElementById('liveClock').textContent = timeStr + ' น.';
-      
-      // ตรวจสอบการข้ามเวลา 08:00 น. ระหว่างที่เปิดหน้าเว็บทิ้งไว้
       checkAndResetDailyCycle();
     }
 
-    // จัดการบันทึกเวลาเมื่อสถานะเปิด/ปิดเปลี่ยนไป
     function updateStateTracking(newStates) {
       for (let i = 0; i < 4; i++) {
         if (newStates[i] !== relayStates[i]) {
@@ -261,21 +254,31 @@
       relayStates = [...newStates];
     }
 
-    // คำนวณชั่วโมงและพลังงานแบบเรียลไทม์
+    // คำนวณเวลาให้อยู่ในรูปแบบ ชั่วโมง : นาที : วินาที (HH : MM : SS)
     function getDeviceStats(idx) {
-      let totalSecs = deviceTotalSeconds[idx] || 0;
+      let totalSecs = Math.floor(deviceTotalSeconds[idx] || 0);
       if (relayStates[idx] && deviceOnSince[idx]) {
-        totalSecs += (Date.now() - deviceOnSince[idx]) / 1000;
+        totalSecs += Math.floor((Date.now() - deviceOnSince[idx]) / 1000);
       }
-      const hours = totalSecs / 3600;
-      const energy = hours * devices[idx].multiplier;
+      
+      // แปลงวินาทีเป็น ชั่วโมง นาที และวินาที
+      const h = Math.floor(totalSecs / 3600);
+      const m = Math.floor((totalSecs % 3600) / 60);
+      const s = Math.floor(totalSecs % 60);
+
+      const timeFormatted = `${String(h).padStart(2, '0')} : ${String(m).padStart(2, '0')} : ${String(s).padStart(2, '0')}`;
+      
+      // คำนวณพลังงานสะสมจากชั่วโมงจริง
+      const fractionalHours = totalSecs / 3600;
+      const energy = (fractionalHours * devices[idx].multiplier).toFixed(4);
+
       return { 
-        hours: hours.toFixed(4), 
-        energy: energy.toFixed(4) 
+        timeFormatted: timeFormatted, 
+        energy: energy 
       };
     }
 
-    // อัปเดตตัวเลขแสดงผลบนหน้าจอทุกวินาที
+    // อัปเดตตัวเลขแสดงผลทุกวินาที
     function updateLiveStatsUI() {
       for (let i = 0; i < 4; i++) {
         if (devices[i].trackTime) {
@@ -283,7 +286,7 @@
           const timeEl = document.getElementById(`time_${i}`);
           const energyEl = document.getElementById(`energy_${i}`);
           if (timeEl && energyEl) {
-            timeEl.textContent = stats.hours;
+            timeEl.textContent = stats.timeFormatted;
             energyEl.textContent = stats.energy;
           }
         }
@@ -336,12 +339,16 @@
           ${dev.trackTime ? `
             <div class="mt-4 pt-3 border-t border-white/10 grid grid-cols-2 gap-3 text-center">
               <div class="bg-slate-800/40 rounded-lg p-2 border border-slate-700/50">
-                <div class="text-[10px] text-slate-400 mb-0.5">ชั่วโมงการทำงาน/วัน</div>
-                <div class="text-xs font-semibold text-sky-400"><span id="time_${idx}">${stats.hours}</span> ชม.</div>
+                <div class="text-[10px] text-slate-400 mb-0.5">เวลาทำงาน (ชม. : นาที : วิ.)</div>
+                <div class="text-xs font-semibold text-sky-400 font-mono tracking-wide">
+                  <span id="time_${idx}">${stats.timeFormatted}</span>
+                </div>
               </div>
               <div class="bg-slate-800/40 rounded-lg p-2 border border-slate-700/50">
                 <div class="text-[10px] text-slate-400 mb-0.5">พลังงานใช้ไป</div>
-                <div class="text-xs font-semibold text-emerald-400"><span id="energy_${idx}">${stats.energy}</span> หน่วย</div>
+                <div class="text-xs font-semibold text-emerald-400 font-mono">
+                  <span id="energy_${idx}">${stats.energy}</span> หน่วย
+                </div>
               </div>
             </div>
           ` : ''}
