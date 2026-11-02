@@ -112,7 +112,7 @@
       </div>
     </div>
 
-    <!-- โหมดอัตโนมัติ -->
+    <!-- โหมดอัตโนมัติ (ใส่ checked เป็นค่าเริ่มต้น) -->
     <div class="glass-card rounded-2xl p-4 border-l-4 border-l-sky-500 relative overflow-hidden">
       <div class="flex items-start justify-between gap-3">
         <div class="flex gap-3">
@@ -128,7 +128,7 @@
           </div>
         </div>
         <div class="relative inline-block w-12 align-middle select-none mt-1">
-          <input type="checkbox" id="scheduleToggle" class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-2 border-slate-700 appearance-none cursor-pointer focus:outline-none"/>
+          <input type="checkbox" id="scheduleToggle" checked class="toggle-checkbox absolute block w-6 h-6 rounded-full bg-white border-2 border-slate-700 appearance-none cursor-pointer focus:outline-none"/>
           <label for="scheduleToggle" class="toggle-label block overflow-hidden h-6 rounded-full bg-slate-700/80 cursor-pointer transition-colors duration-200"></label>
         </div>
       </div>
@@ -158,7 +158,6 @@
     let socket = null;
     let isWsConnected = false;
 
-    // ข้อมูลอุปกรณ์และตัวคูณคำนวณพลังงาน
     const devices = [
       { 
         name: "Air Conditioner 1", 
@@ -190,31 +189,24 @@
       }
     ];
 
-    // สถานะจริงของรีเลย์ที่ได้รับยืนยันจากบอร์ด ESP32
     let relayStates = [false, false, false, false];
     let deviceTotalSeconds = [0, 0, 0, 0];
     let lastTickTimestamp = Date.now();
 
-    // -------------------------------------------------------------
-    // ฟังก์ชันคำนวณรอบวัน โดยตัดรอบใหม่ที่เวลา 07:50 น.
-    // -------------------------------------------------------------
     function getOperationalDayKey(now) {
       const d = new Date(now.getTime());
       const totalMinutes = d.getHours() * 60 + d.getMinutes();
-      // หากเวลาก่อน 07:50 น. (470 นาที) จะนับเป็นรอบของเมื่อวาน
       if (totalMinutes < 470) {
         d.setDate(d.getDate() - 1);
       }
       return `smart_office_cycle_${d.getFullYear()}_${d.getMonth() + 1}_${d.getDate()}`;
     }
 
-    // ตรวจสอบและรีเซ็ตค่าเป็น 0 อัตโนมัติเมื่อถึง 07:50 น.
     function checkAndResetDailyCycle(now) {
       const currentKey = getOperationalDayKey(now);
       const savedKey = localStorage.getItem('smart_office_active_cycle');
 
       if (savedKey !== currentKey) {
-        // ถึงเวลา 07:50 น. ของวันใหม่ -> รีเซ็ตเวลาและพลังงานเป็น 0 ทันที
         deviceTotalSeconds = [0, 0, 0, 0];
         localStorage.setItem('smart_office_active_cycle', currentKey);
         localStorage.setItem('smart_office_seconds', JSON.stringify(deviceTotalSeconds));
@@ -231,36 +223,27 @@
       }
     }
 
-    // บันทึกค่าวินาทีสะสมลง LocalStorage
     function saveTotalSeconds() {
       localStorage.setItem('smart_office_seconds', JSON.stringify(deviceTotalSeconds));
     }
 
-    // -------------------------------------------------------------
-    // ฟังก์ชันคำนวณเฉพาะช่วงเวลาทำงาน (08:00 - 16:00 น.)
-    // -------------------------------------------------------------
     function getWorkingSecondsBetween(startMs, endMs) {
       if (startMs >= endMs) return 0;
       const startDate = new Date(startMs);
       const endDate = new Date(endMs);
 
-      // วินาทีนับจากเที่ยงคืนของเวลาเริ่มต้นและสิ้นสุด
       const startSec = startDate.getHours() * 3600 + startDate.getMinutes() * 60 + startDate.getSeconds() + startDate.getMilliseconds() / 1000;
       const endSec = endDate.getHours() * 3600 + endDate.getMinutes() * 60 + endDate.getSeconds() + endDate.getMilliseconds() / 1000;
 
-      // ขอบเขตช่วงเวลา 08:00:00 (28,800 วิ) ถึง 16:00:00 (57,600 วิ)
       const windowStart = 8 * 3600;
       const windowEnd = 16 * 3600;
 
-      // หาจุดตัดที่อยู่ในช่วงเวลา 08:00 - 16:00 เท่านั้น
       const overlapStart = Math.max(startSec, windowStart);
       const overlapEnd = Math.min(endSec, windowEnd);
 
-      // หลัง 16:00 หรือก่อน 08:00 จะคืนค่า 0 (ไม่นับเวลาและพลังงานเพิ่ม)
       return overlapEnd > overlapStart ? (overlapEnd - overlapStart) : 0;
     }
 
-    // คำนวณรูปแบบเวลาและพลังงานสะสม
     function getDeviceStats(idx) {
       const totalSecs = Math.floor(deviceTotalSeconds[idx] || 0);
       const h = String(Math.floor(totalSecs / 3600)).padStart(2, '0');
@@ -274,7 +257,6 @@
       return { timeFormatted, energy };
     }
 
-    // อัปเดตตัวเลขแสดงผลบนหน้าจอ
     function updateLiveStatsUI() {
       for (let i = 0; i < 4; i++) {
         if (devices[i].trackTime) {
@@ -289,24 +271,15 @@
       }
     }
 
-    // -------------------------------------------------------------
-    // ลูปหลักทำงานทุก 1 วินาที (Heartbeat Ticker)
-    // -------------------------------------------------------------
     function mainTicker() {
       const now = new Date();
       const nowMs = now.getTime();
 
-      // ตรวจสอบการรีเซ็ต 07:50 น.
       checkAndResetDailyCycle(now);
 
-      // คำนวณวินาทีที่ผ่านไปเฉพาะในช่วง 08:00 - 16:00 น.
       const workingSec = getWorkingSecondsBetween(lastTickTimestamp, nowMs);
       lastTickTimestamp = nowMs;
 
-      // เริ่มคิดเวลาและพลังงานก็ต่อเมื่อ:
-      // 1. อยู่ในช่วง 08:00 - 16:00 น. (workingSec > 0)
-      // 2. มีการเชื่อมต่อกับระบบจริง (isWsConnected)
-      // 3. บอร์ด ESP32 ยืนยันว่ารีเลย์ต่อวงจรทำงานแล้วเท่านั้น (relayStates[i] === true)
       if (isWsConnected && workingSec > 0) {
         let hasChanged = false;
         for (let i = 0; i < 4; i++) {
@@ -320,20 +293,15 @@
         }
       }
 
-      // แสดงเวลาปัจจุบัน
       const timeStr = now.toLocaleTimeString('th-TH', { hour12: false });
       document.getElementById('liveClock').textContent = timeStr + ' น.';
 
       updateLiveStatsUI();
     }
 
-    // เริ่มต้นตัวตรวจจับเวลา
     checkAndResetDailyCycle(new Date());
     setInterval(mainTicker, 1000);
 
-    // -------------------------------------------------------------
-    // การแสดงผลการ์ดอุปกรณ์ (UI Render)
-    // -------------------------------------------------------------
     function renderCards() {
       const container = document.getElementById('relaysContainer');
       container.innerHTML = '';
@@ -394,9 +362,6 @@
       document.getElementById('activeCount').textContent = `${activeCount} / ${devices.length} เครื่อง`;
     }
 
-    // -------------------------------------------------------------
-    // ระบบเชื่อมต่อ WebSocket
-    // -------------------------------------------------------------
     function initWebSocket() {
       try {
         socket = new WebSocket(wsUrl);
@@ -404,7 +369,6 @@
         socket.onopen = () => {
           isWsConnected = true;
           updateBadge(true);
-          // ขอสถานะล่าสุดจาก Server
           socket.send(JSON.stringify({ type: "GET_STATE" }));
         };
 
@@ -412,11 +376,11 @@
           try {
             const data = JSON.parse(event.data);
 
+            // ซิงค์สถานะ Auto Schedule จาก Server เสมอ
             if (typeof data.autoMode === 'boolean') {
               document.getElementById('scheduleToggle').checked = data.autoMode;
             }
 
-            // รับสถานะรีเลย์จริงจาก ESP32 / Server เพื่อสั่งเรนเดอร์และนับเวลา
             if (data.relays && Array.isArray(data.relays)) {
               relayStates = data.relays;
               renderCards();
@@ -460,14 +424,10 @@
       }
     }
 
-    // -------------------------------------------------------------
-    // ฟังก์ชันสั่งการ (ส่งคำสั่งไปยัง ESP32 ไม่นับเวลาก่อนได้รับการยืนยัน)
-    // -------------------------------------------------------------
     function toggleRelay(ch, state) {
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "CONTROL", ch: ch, state: state }));
       } else {
-        // หากออฟไลน์อยู่ ให้ดึงสวิตช์กลับค่าเดิม
         renderCards();
       }
     }
@@ -478,6 +438,7 @@
       }
     }
 
+    // เมื่อผู้ใช้กดคลิกสลับสวิตช์ Auto Schedule ถึงจะส่งคำสั่ง TOGGLE_AUTO ไปยังเซิร์ฟเวอร์
     document.getElementById('scheduleToggle').addEventListener('change', function() {
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "TOGGLE_AUTO", state: this.checked }));
