@@ -7,29 +7,32 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/esp' });
 
-// ตัวแปรเก็บสถานะ Relay ทั้ง 4 ช่อง [Air1, Air2, Air3, Relay4]
+// สถานะ Relay ทั้ง 4 ช่อง [Air1, Air2, Air3, Relay4]
 let relayStates = [false, false, false, false];
-let autoMode = true; // เปิดใช้งานโหมดอัตโนมัติเป็นค่าเริ่มต้น
+let autoMode = true; // เริ่มต้นด้วยโหมดทำงานอัตโนมัติ
 
-// -------------------------------------------------------------------------
-// ตัวแปรส่วนกลางสำหรับนับเวลาสะสม (หน่วยเป็นวินาที) บน Server
-// -------------------------------------------------------------------------
+// ตัวแปรเก็บเวลานับสะสม (วินาที) ส่วนกลางบน Server
 let deviceTotalSeconds = [0, 0, 0, 0];
 let lastAutoResetDate = '';  // บันทึกวันที่เพื่อเปิดโหมด Auto ตอน 07:45 น.
-let lastDailyResetDate = ''; // บันทึกวันที่เพื่อรีเซ็ตเวลาเป็น 0 ตอน 07:50 น.
+let lastDailyResetDate = ''; // บันทึกวันที่เพื่อรีเซ็ตค่าเป็น 0 ตอน 07:50 น.
 
-// ให้บริการไฟล์ Static จากโฟลเดอร์ public
+// ตัวแปรตรวจสอบว่าฮาร์ดแวร์ ESP32 ออนไลน์และต่อไฟอยู่จริงหรือไม่
+let isHardwareOnline = false;
+let espClientSocket = null;
+
+// ให้บริการไฟล์หน้าเว็บจากโฟลเดอร์ public
 app.use(express.static(path.join(__dirname, 'public')));
 
 // -------------------------------------------------------------------------
-// ฟังก์ชันกระจายสถานะล่าสุด (Broadcast) ไปยังทุก Client (ESP32 และ Web UI)
+// ฟังก์ชันกระจายข้อมูล (Broadcast) ไปยังทุก Client (ทั้งหน้าเว็บและ ESP32)
 // -------------------------------------------------------------------------
 function broadcastState() {
     const payload = JSON.stringify({
         type: 'INIT_STATE',
         relays: relayStates,
         autoMode: autoMode,
-        deviceTotalSeconds: deviceTotalSeconds // ส่งค่าเวลากลางไปให้ทุกเครื่องพร้อมกัน
+        deviceTotalSeconds: deviceTotalSeconds,
+        hardwareOnline: isHardwareOnline
     });
 
     wss.clients.forEach((client) => {
@@ -40,17 +43,27 @@ function broadcastState() {
 }
 
 // -------------------------------------------------------------------------
-// ฟังก์ชันตรวจสอบตารางเวลาสลับแอร์ (08:00 - 16:00 น.)
+// ฟังก์ชันคำนวณตารางเวลาสลับแอร์ (08:00 - 16:00 น.)
 // -------------------------------------------------------------------------
 function checkAutoSchedule(hours, minutes) {
-    if (!autoMode) return; // หากผู้ใช้ปิดโหมด Auto จะไม่ปรับสถานะแอร์ทับ
+    if (!autoMode) return;
+
+    // หากบอร์ด ESP32 ถูกถอดปลั๊กหรือออฟไลน์อยู่ รีเลย์จริงไม่ได้ทำงาน จะไม่สั่งเปิดแอร์
+    if (!isHardwareOnline) {
+        const wasOn = relayStates.some(state => state === true);
+        if (wasOn) {
+            relayStates = [false, false, false, false];
+            broadcastState();
+        }
+        return;
+    }
 
     const totalMinutes = hours * 60 + minutes;
     let air1 = false;
     let air2 = false;
     let air3 = false;
 
-    // ตารางเวลาทำงานสลับเครื่องปรับอากาศ (08:00 - 16:00 น.)
+    // ตารางเวลาสลับแอร์ 08:00 - 16:00 น.
     if (totalMinutes >= 480 && totalMinutes < 510) {          // 08:00 - 08:30 [Air1]
         air1 = true;
     } else if (totalMinutes >= 510 && totalMinutes < 540) {   // 08:30 - 09:00 [Air2]
@@ -80,7 +93,6 @@ function checkAutoSchedule(hours, minutes) {
     } else if (totalMinutes >= 930 && totalMinutes < 960) {   // 15:30 - 16:00 [Air1]
         air1 = true;
     }
-    // หลัง 16:00 น. แอร์ทั้ง 3 เครื่องจะดับทั้งหมด
 
     let isChanged = false;
     if (relayStates[0] !== air1) { relayStates[0] = air1; isChanged = true; }
@@ -94,7 +106,7 @@ function checkAutoSchedule(hours, minutes) {
 }
 
 // -------------------------------------------------------------------------
-// ลูปหลักบน Server ทำงานทุกๆ 1 วินาที (Master Heartbeat & Counter)
+// Master Loop บน Server ทำงานทุก 1 วินาที
 // -------------------------------------------------------------------------
 setInterval(() => {
     const now = new Date();
@@ -106,7 +118,7 @@ setInterval(() => {
     const totalMinutes = hours * 60 + minutes;
     const dateStr = `${thTime.getFullYear()}-${thTime.getMonth() + 1}-${thTime.getDate()}`;
 
-    // 1. เงื่อนไขเวลา 07:45 น. บังคับเข้าโหมด Auto ประจำวันเสมอ
+    // 1. เวลา 07:45 น. บังคับเข้าโหมด Auto เสมอ
     if (hours === 7 && minutes === 45 && lastAutoResetDate !== dateStr) {
         lastAutoResetDate = dateStr;
         if (!autoMode) {
@@ -116,7 +128,7 @@ setInterval(() => {
         }
     }
 
-    // 2. เงื่อนไขเวลา 07:50 น. รีเซ็ตเวลานับสะสมและพลังงานเป็น 0 อัตโนมัติ
+    // 2. เวลา 07:50 น. รีเซ็ตเวลาและพลังงานเป็น 0
     if (hours === 7 && minutes === 50 && lastDailyResetDate !== dateStr) {
         lastDailyResetDate = dateStr;
         deviceTotalSeconds = [0, 0, 0, 0];
@@ -124,14 +136,15 @@ setInterval(() => {
         broadcastState();
     }
 
-    // 3. ตรวจสอบตารางการทำงานแอร์
+    // 3. ตรวจสอบตารางการเปิด-ปิดแอร์
     checkAutoSchedule(hours, minutes);
 
-    // 4. บันทึกวินาทีสะสมเฉพาะช่วงเวลา 08:00 - 16:00 น. (และแอร์กำลังต่อวงจรทำงานจริง)
+    // 4. บันทึกวินาทีสะสม:
+    // ต้องอยู่ในช่วง 08:00 - 16:00 น. AND บอร์ด ESP32 เสียบปลั๊กออนไลน์อยู่จริง (isHardwareOnline) AND รีเลย์ติดจริง
     const isWorkingHours = totalMinutes >= 480 && totalMinutes < 960;
     let secondsChanged = false;
 
-    if (isWorkingHours) {
+    if (isWorkingHours && isHardwareOnline) {
         for (let i = 0; i < 4; i++) {
             if (relayStates[i] === true) {
                 deviceTotalSeconds[i] += 1;
@@ -140,36 +153,68 @@ setInterval(() => {
         }
     }
 
-    // ถ้ามีการนับเวลาเพิ่มขึ้น ให้ Broadcast อัปเดตไปยังหน้าเว็บทุกเครื่องแบบเรียลไทม์
     if (secondsChanged) {
         broadcastState();
     }
 }, 1000);
 
 // -------------------------------------------------------------------------
-// WebSocket Event Handlers
+// WebSocket Server Handlers
 // -------------------------------------------------------------------------
 wss.on('connection', (ws, req) => {
-    console.log(`[WS] Client เชื่อมต่อ: ${req.socket.remoteAddress}`);
+    const userAgent = (req.headers['user-agent'] || '').toLowerCase();
+    
+    // ตรวจจับว่า Client ที่เชื่อมเข้ามาคือบอร์ด ESP32 หรือไม่ (WebSocketsClient บนบอร์ดจะส่ง user-agent เป็น arduino)
+    const isEspDevice = userAgent.includes('arduino') || userAgent.includes('esp');
+    if (isEspDevice) {
+        ws.isHardware = true;
+        espClientSocket = ws;
+        isHardwareOnline = true;
+        console.log(`[WS] 🟢 ฮาร์ดแวร์ ESP32 เชื่อมต่อสำเร็จ (${req.socket.remoteAddress})`);
+        
+        // เมื่อบอร์ดต่อเข้ามาใหม่ ให้ประมวลผลตารางเวลาทันที
+        const now = new Date();
+        const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+        const thTime = new Date(utc + (3600000 * 7));
+        checkAutoSchedule(thTime.getHours(), thTime.getMinutes());
+        broadcastState();
+    } else {
+        console.log(`[WS] 📱 หน้าเว็บ Dashboard เชื่อมต่อ (${req.socket.remoteAddress})`);
+    }
 
-    // ส่งสถานะปัจจุบันและเวลากลางล่าสุดให้ Client ทันทีที่เชื่อมต่อ
+    // ส่งสถานะปัจจุบันให้ Client
     ws.send(JSON.stringify({
         type: 'INIT_STATE',
         relays: relayStates,
         autoMode: autoMode,
-        deviceTotalSeconds: deviceTotalSeconds
+        deviceTotalSeconds: deviceTotalSeconds,
+        hardwareOnline: isHardwareOnline
     }));
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
 
+            // หาก Client ส่ง STATE_UPDATE แสดงว่าเป็นบอร์ด ESP32 แน่นอน
+            if (data.type === 'STATE_UPDATE') {
+                ws.isHardware = true;
+                espClientSocket = ws;
+                isHardwareOnline = true;
+
+                if (Array.isArray(data.relays) && data.relays.length === 4) {
+                    relayStates = data.relays;
+                    broadcastState();
+                }
+                return;
+            }
+
             if (data.type === 'GET_STATE') {
                 ws.send(JSON.stringify({
                     type: 'INIT_STATE',
                     relays: relayStates,
                     autoMode: autoMode,
-                    deviceTotalSeconds: deviceTotalSeconds
+                    deviceTotalSeconds: deviceTotalSeconds,
+                    hardwareOnline: isHardwareOnline
                 }));
             }
             else if (data.type === 'CONTROL') {
@@ -196,23 +241,28 @@ wss.on('connection', (ws, req) => {
                 }
                 broadcastState();
             }
-            else if (data.type === 'STATE_UPDATE' && Array.isArray(data.relays)) {
-                if (data.relays.length === 4) {
-                    relayStates = data.relays;
-                    broadcastState();
-                }
-            }
         } catch (err) {
-            console.error('[WS] ข้อความ JSON ผิดพลาด:', err.message);
+            console.error('[WS] ข้อมูล JSON ผิดพลาด:', err.message);
         }
     });
 
     ws.on('close', () => {
-        console.log('[WS] Client ตัดการเชื่อมต่อ');
+        // เมื่อฮาร์ดแวร์ ESP32 ขาดการเชื่อมต่อ (ถอดปลั๊ก / ไฟดับ / เน็ตหลุด)
+        if (ws.isHardware || ws === espClientSocket) {
+            espClientSocket = null;
+            isHardwareOnline = false;
+            console.log('[WS] 🔴 ฮาร์ดแวร์ ESP32 ขาดการเชื่อมต่อ (ถอดปลั๊กหรือออฟไลน์)');
+            
+            // รีเซ็ตสถานะรีเลย์บนระบบเป็น false ทั้งหมดทันที เพราะฮาร์ดแวร์ไม่มีไฟเลี้ยงแล้ว
+            relayStates = [false, false, false, false];
+            broadcastState(); // แจ้งหน้าเว็บทันที และระบบจะหยุดนับวินาที/หยุดคำนวณพลังงาน
+        } else {
+            console.log('[WS] หน้าเว็บ Dashboard ปิดการเชื่อมต่อ');
+        }
     });
 
     ws.on('error', (error) => {
-        console.error('[WS] เกิดข้อผิดพลาด:', error.message);
+        console.error('[WS] Error:', error.message);
     });
 });
 
