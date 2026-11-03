@@ -7,12 +7,18 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/esp' });
 
-// เก็บสถานะ Relay ทั้ง 4 ช่อง [Air1, Air2, Air3, Relay4]
+// ตัวแปรเก็บสถานะ Relay ทั้ง 4 ช่อง [Air1, Air2, Air3, Relay4]
 let relayStates = [false, false, false, false];
 let autoMode = true; // เปิดใช้งานโหมดอัตโนมัติเป็นค่าเริ่มต้น
-let lastAutoResetDate = ''; // บันทึกวันที่เพื่อป้องกันการวนลูปสลับสถานะซ้ำที่เวลา 07:45 น.
 
-// เสิร์ฟไฟล์ Static (เช่น index.html) จากโฟลเดอร์ public
+// -------------------------------------------------------------------------
+// ตัวแปรส่วนกลางสำหรับนับเวลาสะสม (หน่วยเป็นวินาที) บน Server
+// -------------------------------------------------------------------------
+let deviceTotalSeconds = [0, 0, 0, 0];
+let lastAutoResetDate = '';  // บันทึกวันที่เพื่อเปิดโหมด Auto ตอน 07:45 น.
+let lastDailyResetDate = ''; // บันทึกวันที่เพื่อรีเซ็ตเวลาเป็น 0 ตอน 07:50 น.
+
+// ให้บริการไฟล์ Static จากโฟลเดอร์ public
 app.use(express.static(path.join(__dirname, 'public')));
 
 // -------------------------------------------------------------------------
@@ -22,7 +28,8 @@ function broadcastState() {
     const payload = JSON.stringify({
         type: 'INIT_STATE',
         relays: relayStates,
-        autoMode: autoMode
+        autoMode: autoMode,
+        deviceTotalSeconds: deviceTotalSeconds // ส่งค่าเวลากลางไปให้ทุกเครื่องพร้อมกัน
     });
 
     wss.clients.forEach((client) => {
@@ -33,36 +40,17 @@ function broadcastState() {
 }
 
 // -------------------------------------------------------------------------
-// ฟังก์ชันตรวจสอบเวลาและควบคุมการทำงานอัตโนมัติ (UTC+7 เวลาประเทศไทย)
+// ฟังก์ชันตรวจสอบตารางเวลาสลับแอร์ (08:00 - 16:00 น.)
 // -------------------------------------------------------------------------
-function checkAutoSchedule() {
-    const now = new Date();
-    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-    const thTime = new Date(utc + (3600000 * 7)); // ปรับเวลาเป็นเขตประเทศไทย (UTC+7)
+function checkAutoSchedule(hours, minutes) {
+    if (!autoMode) return; // หากผู้ใช้ปิดโหมด Auto จะไม่ปรับสถานะแอร์ทับ
 
-    const hours = thTime.getHours();
-    const minutes = thTime.getMinutes();
     const totalMinutes = hours * 60 + minutes;
-    const dateStr = `${thTime.getFullYear()}-${thTime.getMonth() + 1}-${thTime.getDate()}`;
-
-    // 1. เงื่อนไขบังคับเข้าโหมดอัตโนมัติเสมอเมื่อถึงเวลา 07:45 น. ของทุกวัน
-    if (hours === 7 && minutes === 45 && lastAutoResetDate !== dateStr) {
-        lastAutoResetDate = dateStr;
-        if (!autoMode) {
-            autoMode = true;
-            console.log(`[Auto Schedule] ⏰ เวลา 07:45 น. (${dateStr}): เข้าสู่โหมดทำงานอัตโนมัติประจำวัน`);
-            broadcastState();
-        }
-    }
-
-    // หากผู้ใช้เลือกปิดโหมด Auto (สลับเป็น Manual) จะข้ามการควบคุมตามตารางเวลา
-    if (!autoMode) return;
-
     let air1 = false;
     let air2 = false;
     let air3 = false;
 
-    // 2. ตารางเวลาทำงานสลับเครื่องปรับอากาศ (08:00 - 16:00 น.)
+    // ตารางเวลาทำงานสลับเครื่องปรับอากาศ (08:00 - 16:00 น.)
     if (totalMinutes >= 480 && totalMinutes < 510) {          // 08:00 - 08:30 [Air1]
         air1 = true;
     } else if (totalMinutes >= 510 && totalMinutes < 540) {   // 08:30 - 09:00 [Air2]
@@ -92,50 +80,98 @@ function checkAutoSchedule() {
     } else if (totalMinutes >= 930 && totalMinutes < 960) {   // 15:30 - 16:00 [Air1]
         air1 = true;
     }
-    // นอกช่วง 08:00 - 16:00 น. แอร์ทั้ง 3 เครื่องจะถูกสั่งปิด (false) ทั้งหมด
+    // หลัง 16:00 น. แอร์ทั้ง 3 เครื่องจะดับทั้งหมด
 
-    // ตรวจสอบการเปลี่ยนแปลงสถานะรีเลย์ช่อง 0, 1, 2
     let isChanged = false;
     if (relayStates[0] !== air1) { relayStates[0] = air1; isChanged = true; }
     if (relayStates[1] !== air2) { relayStates[1] = air2; isChanged = true; }
     if (relayStates[2] !== air3) { relayStates[2] = air3; isChanged = true; }
 
-    // กระจายสถานะไปยัง ESP32 และหน้าเว็บทันทีที่มีการเปลี่ยนแปลง
     if (isChanged) {
-        console.log(`[Auto Schedule] ปรับสถานะตามเวลา: Air1=${air1}, Air2=${air2}, Air3=${air3}`);
+        console.log(`[Auto Schedule] สลับสถานะ: Air1=${air1}, Air2=${air2}, Air3=${air3}`);
         broadcastState();
     }
 }
 
-// ตรวจสอบเวลาทุกๆ 10 วินาที
-setInterval(checkAutoSchedule, 10000);
+// -------------------------------------------------------------------------
+// ลูปหลักบน Server ทำงานทุกๆ 1 วินาที (Master Heartbeat & Counter)
+// -------------------------------------------------------------------------
+setInterval(() => {
+    const now = new Date();
+    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+    const thTime = new Date(utc + (3600000 * 7)); // เวลาไทย (UTC+7)
+
+    const hours = thTime.getHours();
+    const minutes = thTime.getMinutes();
+    const totalMinutes = hours * 60 + minutes;
+    const dateStr = `${thTime.getFullYear()}-${thTime.getMonth() + 1}-${thTime.getDate()}`;
+
+    // 1. เงื่อนไขเวลา 07:45 น. บังคับเข้าโหมด Auto ประจำวันเสมอ
+    if (hours === 7 && minutes === 45 && lastAutoResetDate !== dateStr) {
+        lastAutoResetDate = dateStr;
+        if (!autoMode) {
+            autoMode = true;
+            console.log(`[Auto Schedule] ⏰ เวลา 07:45 น. (${dateStr}): เข้าสู่โหมดอัตโนมัติประจำวัน`);
+            broadcastState();
+        }
+    }
+
+    // 2. เงื่อนไขเวลา 07:50 น. รีเซ็ตเวลานับสะสมและพลังงานเป็น 0 อัตโนมัติ
+    if (hours === 7 && minutes === 50 && lastDailyResetDate !== dateStr) {
+        lastDailyResetDate = dateStr;
+        deviceTotalSeconds = [0, 0, 0, 0];
+        console.log(`[Daily Reset] 🔄 เวลา 07:50 น. (${dateStr}): รีเซ็ตเวลาและพลังงานสะสมเป็น 0`);
+        broadcastState();
+    }
+
+    // 3. ตรวจสอบตารางการทำงานแอร์
+    checkAutoSchedule(hours, minutes);
+
+    // 4. บันทึกวินาทีสะสมเฉพาะช่วงเวลา 08:00 - 16:00 น. (และแอร์กำลังต่อวงจรทำงานจริง)
+    const isWorkingHours = totalMinutes >= 480 && totalMinutes < 960;
+    let secondsChanged = false;
+
+    if (isWorkingHours) {
+        for (let i = 0; i < 4; i++) {
+            if (relayStates[i] === true) {
+                deviceTotalSeconds[i] += 1;
+                secondsChanged = true;
+            }
+        }
+    }
+
+    // ถ้ามีการนับเวลาเพิ่มขึ้น ให้ Broadcast อัปเดตไปยังหน้าเว็บทุกเครื่องแบบเรียลไทม์
+    if (secondsChanged) {
+        broadcastState();
+    }
+}, 1000);
 
 // -------------------------------------------------------------------------
-// WebSocket Server Event Handlers
+// WebSocket Event Handlers
 // -------------------------------------------------------------------------
 wss.on('connection', (ws, req) => {
     console.log(`[WS] Client เชื่อมต่อ: ${req.socket.remoteAddress}`);
 
-    // ส่งสถานะปัจจุบันและโหมด Auto ทันทีที่ Client เชื่อมต่อ
+    // ส่งสถานะปัจจุบันและเวลากลางล่าสุดให้ Client ทันทีที่เชื่อมต่อ
     ws.send(JSON.stringify({
         type: 'INIT_STATE',
         relays: relayStates,
-        autoMode: autoMode
+        autoMode: autoMode,
+        deviceTotalSeconds: deviceTotalSeconds
     }));
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message);
 
-            // คำขอรับสถานะล่าสุด
             if (data.type === 'GET_STATE') {
                 ws.send(JSON.stringify({
                     type: 'INIT_STATE',
                     relays: relayStates,
-                    autoMode: autoMode
+                    autoMode: autoMode,
+                    deviceTotalSeconds: deviceTotalSeconds
                 }));
             }
-            // สั่งเปิด-ปิดรายช่อง (Manual Control)
             else if (data.type === 'CONTROL') {
                 const { ch, state } = data;
                 if (ch >= 0 && ch < 4) {
@@ -143,23 +179,23 @@ wss.on('connection', (ws, req) => {
                     broadcastState();
                 }
             }
-            // สั่งเปิด-ปิดทั้งหมด (Manual All)
             else if (data.type === 'CONTROL_ALL') {
                 for (let i = 0; i < 4; i++) {
                     relayStates[i] = data.state;
                 }
                 broadcastState();
             }
-            // สลับโหมดการทำงาน Auto / Manual จากสวิตช์หน้าเว็บ
             else if (data.type === 'TOGGLE_AUTO') {
                 autoMode = Boolean(data.state);
-                console.log(`[Auto Schedule] ผู้ใช้สลับสถานะโหมด Auto เป็น: ${autoMode ? 'เปิด' : 'ปิด'}`);
+                console.log(`[Auto Schedule] ผู้ใช้สลับโหมด Auto: ${autoMode ? 'เปิด' : 'ปิด'}`);
                 if (autoMode) {
-                    checkAutoSchedule(); // ประมวลผลตารางเวลาทันทีที่เปิดสวิตช์
+                    const now = new Date();
+                    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+                    const thTime = new Date(utc + (3600000 * 7));
+                    checkAutoSchedule(thTime.getHours(), thTime.getMinutes());
                 }
                 broadcastState();
             }
-            // ESP32 ส่งสถานะฮาร์ดแวร์จริงกลับมาอัปเดต (Two-way Sync)
             else if (data.type === 'STATE_UPDATE' && Array.isArray(data.relays)) {
                 if (data.relays.length === 4) {
                     relayStates = data.relays;
@@ -180,11 +216,9 @@ wss.on('connection', (ws, req) => {
     });
 });
 
-// เริ่มต้น Web Server
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Smart Office Server กำลังทำงานที่พอร์ต ${PORT}`);
     console.log(`🌐 Web URL: http://localhost:${PORT}`);
     console.log(`🔌 WebSocket Endpoint: ws://localhost:${PORT}/esp`);
-    checkAutoSchedule(); // ตรวจสอบรอบเวลาทันทีเมื่อเริ่มต้นเซิร์ฟเวอร์
 });
