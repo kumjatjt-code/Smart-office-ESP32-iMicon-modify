@@ -83,10 +83,10 @@
         </div>
       </div>
       
-      <!-- ป้ายสถานะออนไลน์/ออฟไลน์ -->
+      <!-- ป้ายสถานะฮาร์ดแวร์จริง -->
       <div id="statusBadge" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">
         <span class="w-2 h-2 rounded-full bg-rose-400"></span>
-        <span id="statusText">กำลังเชื่อมต่อ...</span>
+        <span id="statusText">รอการเชื่อมต่อ...</span>
       </div>
     </header>
 
@@ -189,10 +189,8 @@
     ];
 
     let relayStates = [false, false, false, false];
-    // ตัวแปรเวลากลางที่รับมาจาก Server
     let deviceTotalSeconds = [0, 0, 0, 0];
 
-    // อัปเดตนาฬิกาหน้าจอ
     function updateClock() {
       const now = new Date();
       const timeStr = now.toLocaleTimeString('th-TH', { hour12: false });
@@ -201,7 +199,6 @@
     setInterval(updateClock, 1000);
     updateClock();
 
-    // แปลงวินาทีสะสมจาก Server เป็น HH : MM : SS และคำนวณพลังงาน
     function getDeviceStats(idx) {
       const totalSecs = Math.floor(deviceTotalSeconds[idx] || 0);
       const h = String(Math.floor(totalSecs / 3600)).padStart(2, '0');
@@ -215,7 +212,6 @@
       return { timeFormatted, energy };
     }
 
-    // อัปเดตตัวเลขแสดงผลบนหน้าจอทันทีเมื่อได้รับข้อมูลจาก Server
     function updateLiveStatsUI() {
       for (let i = 0; i < 4; i++) {
         if (devices[i].trackTime) {
@@ -230,7 +226,6 @@
       }
     }
 
-    // วาดการ์ดอุปกรณ์ (UI Render)
     function renderCards() {
       const container = document.getElementById('relaysContainer');
       container.innerHTML = '';
@@ -291,16 +286,31 @@
       document.getElementById('activeCount').textContent = `${activeCount} / ${devices.length} เครื่อง`;
     }
 
-    // -------------------------------------------------------------
-    // ระบบเชื่อมต่อ WebSocket รับข้อมูลจาก Server
-    // -------------------------------------------------------------
+    // ฟังก์ชันอัปเดตป้ายสถานะ โดยเช็กทั้ง Server และ ฮาร์ดแวร์ ESP32
+    function updateBadge(wsConnected, hardwareOnline) {
+      const badge = document.getElementById('statusBadge');
+      const text = document.getElementById('statusText');
+
+      if (!wsConnected) {
+        badge.className = "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20";
+        badge.firstElementChild.className = "w-2 h-2 rounded-full bg-rose-400";
+        text.textContent = "ขาดการเชื่อมต่อ Server";
+      } else if (hardwareOnline) {
+        badge.className = "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
+        badge.firstElementChild.className = "w-2 h-2 rounded-full bg-emerald-400 animate-pulse";
+        text.textContent = "ฮาร์ดแวร์ออนไลน์";
+      } else {
+        badge.className = "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20";
+        badge.firstElementChild.className = "w-2 h-2 rounded-full bg-amber-400";
+        text.textContent = "ESP32 ออฟไลน์ (ถอดปลั๊ก)";
+      }
+    }
+
     function initWebSocket() {
       try {
         socket = new WebSocket(wsUrl);
 
         socket.onopen = () => {
-          updateBadge(true);
-          // ขอรับสถานะล่าสุดและเวลากลางจาก Server ทันที
           socket.send(JSON.stringify({ type: "GET_STATE" }));
         };
 
@@ -308,18 +318,22 @@
           try {
             const data = JSON.parse(event.data);
 
-            // 1. ซิงค์สถานะ Auto Schedule จาก Server
+            // อัปเดตป้ายสถานะตามข้อมูลจริงจาก Server
+            if (typeof data.hardwareOnline === 'boolean') {
+              updateBadge(true, data.hardwareOnline);
+            } else {
+              updateBadge(true, false);
+            }
+
             if (typeof data.autoMode === 'boolean') {
               document.getElementById('scheduleToggle').checked = data.autoMode;
             }
 
-            // 2. รับเวลากลางสะสม (deviceTotalSeconds) จาก Server มาใช้งานโดยตรง
             if (data.deviceTotalSeconds && Array.isArray(data.deviceTotalSeconds)) {
               deviceTotalSeconds = data.deviceTotalSeconds;
               updateLiveStatsUI();
             }
 
-            // 3. รับสถานะรีเลย์จริงจาก Server
             if (data.relays && Array.isArray(data.relays)) {
               relayStates = data.relays;
               renderCards();
@@ -333,7 +347,7 @@
         };
 
         socket.onclose = () => {
-          updateBadge(false);
+          updateBadge(false, false);
           setTimeout(initWebSocket, 3000);
         };
 
@@ -341,22 +355,8 @@
           socket.close();
         };
       } catch (err) {
-        updateBadge(false);
+        updateBadge(false, false);
         setTimeout(initWebSocket, 3000);
-      }
-    }
-
-    function updateBadge(connected) {
-      const badge = document.getElementById('statusBadge');
-      const text = document.getElementById('statusText');
-      if (connected) {
-        badge.className = "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20";
-        badge.firstElementChild.className = "w-2 h-2 rounded-full bg-emerald-400 animate-pulse";
-        text.textContent = "ออนไลน์";
-      } else {
-        badge.className = "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20";
-        badge.firstElementChild.className = "w-2 h-2 rounded-full bg-rose-400";
-        text.textContent = "ขาดการเชื่อมต่อ";
       }
     }
 
