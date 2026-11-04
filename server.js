@@ -1,33 +1,32 @@
-erver · JS
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
- 
+
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/esp' });
- 
+
 // -------------------------------------------------------------------------
-// สถานะหลัก (server คือ source of truth ของ "สถานะที่ต้องการ")
+// สถานะหลัก (Server คือ Single Source of Truth)
 // -------------------------------------------------------------------------
 let relayStates = [false, false, false, false]; // [Air1, Air2, Air3, Relay4]
 let autoMode = true;
 let deviceTotalSeconds = [0, 0, 0, 0];
 let lastAutoResetDate = '';
 let lastDailyResetDate = '';
- 
+
 let isHardwareOnline = false;
 let espClientSocket = null;
 let offlineTimer = null;
 let lastRelaysSentToEsp = '';
- 
-const OFFLINE_GRACE_MS = 20000;  // ผ่อนผันก่อนประกาศว่า ESP32 ออฟไลน์
-const HEARTBEAT_MS = 30000;      // ping ตรวจ socket ค้างทุก 30 วินาที
- 
+
+const OFFLINE_GRACE_MS = 20000;  // ผ่อนผัน 20 วินาทีก่อนประกาศว่า ESP32 ออฟไลน์
+const HEARTBEAT_MS = 30000;      // Ping ตรวจจับ Socket ค้างทุก 30 วินาที
+
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/healthz', (req, res) => res.send('ok'));
- 
+
 // -------------------------------------------------------------------------
 // Utilities
 // -------------------------------------------------------------------------
@@ -36,8 +35,8 @@ function getThaiTime() {
     const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
     return new Date(utc + 3600000 * 7); // UTC+7
 }
- 
-// payload สำหรับหน้าเว็บ: ถ้า ESP32 ออฟไลน์ให้แสดงรีเลย์เป็น OFF ทั้งหมด
+
+// Payload สำหรับหน้าเว็บ: หาก ESP32 ออฟไลน์จะแสดงสถานะรีเลย์เป็น OFF ทั้งหมด
 function webPayload() {
     return JSON.stringify({
         type: 'INIT_STATE',
@@ -47,8 +46,8 @@ function webPayload() {
         hardwareOnline: isHardwareOnline
     });
 }
- 
-// ส่งให้หน้าเว็บทุกหน้า (ไม่ส่งให้ ESP32)
+
+// ส่งสถานะให้เฉพาะหน้าเว็บ Dashboard (ไม่ส่งกวน ESP32)
 function broadcastState() {
     const payload = webPayload();
     wss.clients.forEach((client) => {
@@ -57,8 +56,8 @@ function broadcastState() {
         }
     });
 }
- 
-// ส่งคำสั่งรีเลย์ให้ ESP32 เฉพาะตอนค่าเปลี่ยน (ข้อความเล็ก)
+
+// ส่งคำสั่งรีเลย์ให้ ESP32 เฉพาะตอนที่สถานะเปลี่ยนจริง (แพ็กเก็ตเล็ก)
 function syncRelaysToEsp(force = false) {
     if (!espClientSocket || espClientSocket.readyState !== WebSocket.OPEN) return;
     const msg = JSON.stringify({ type: 'RELAYS', relays: relayStates });
@@ -66,18 +65,37 @@ function syncRelaysToEsp(force = false) {
     lastRelaysSentToEsp = msg;
     espClientSocket.send(msg);
 }
- 
+
 // -------------------------------------------------------------------------
 // ตารางเวลาสลับแอร์ (08:00 - 16:00 น.)
 // -------------------------------------------------------------------------
 function checkAutoSchedule(hours, minutes) {
     if (!autoMode) return;
- 
+
     const totalMinutes = hours * 60 + minutes;
+    const isWorkingHours = totalMinutes >= 480 && totalMinutes < 960; // 08:00 - 16:00 น.
+
+    // นอกเวลาทำงาน: สั่งปิดแอร์ทั้งหมด
+    if (!isWorkingHours) {
+        let changed = false;
+        for (let i = 0; i < 3; i++) {
+            if (relayStates[i] !== false) {
+                relayStates[i] = false;
+                changed = true;
+            }
+        }
+        if (changed) {
+            syncRelaysToEsp();
+            broadcastState();
+        }
+        return;
+    }
+
     let air1 = false;
     let air2 = false;
     let air3 = false;
- 
+
+    // ตารางเวลาทำงานสลับแอร์ทั้ง 3 เครื่องตาม Timing Diagram
     if (totalMinutes >= 480 && totalMinutes < 510) {          // 08:00 - 08:30 [Air1]
         air1 = true;
     } else if (totalMinutes >= 510 && totalMinutes < 540) {   // 08:30 - 09:00 [Air2]
@@ -107,19 +125,19 @@ function checkAutoSchedule(hours, minutes) {
     } else if (totalMinutes >= 930 && totalMinutes < 960) {   // 15:30 - 16:00 [Air1]
         air1 = true;
     }
- 
+
     let isChanged = false;
     if (relayStates[0] !== air1) { relayStates[0] = air1; isChanged = true; }
     if (relayStates[1] !== air2) { relayStates[1] = air2; isChanged = true; }
     if (relayStates[2] !== air3) { relayStates[2] = air3; isChanged = true; }
- 
+
     if (isChanged) {
         console.log(`[Auto Schedule] สลับสถานะ: Air1=${air1}, Air2=${air2}, Air3=${air3}`);
         syncRelaysToEsp();
         broadcastState();
     }
 }
- 
+
 // -------------------------------------------------------------------------
 // Master Loop ทุก 1 วินาที
 // -------------------------------------------------------------------------
@@ -129,7 +147,7 @@ setInterval(() => {
     const minutes = thTime.getMinutes();
     const totalMinutes = hours * 60 + minutes;
     const dateStr = `${thTime.getFullYear()}-${thTime.getMonth() + 1}-${thTime.getDate()}`;
- 
+
     // 07:45 น. บังคับเปิดโหมด Auto
     if (hours === 7 && minutes === 45 && lastAutoResetDate !== dateStr) {
         lastAutoResetDate = dateStr;
@@ -139,7 +157,7 @@ setInterval(() => {
             broadcastState();
         }
     }
- 
+
     // 07:50 น. รีเซ็ตเวลานับสะสม
     if (hours === 7 && minutes === 50 && lastDailyResetDate !== dateStr) {
         lastDailyResetDate = dateStr;
@@ -147,13 +165,13 @@ setInterval(() => {
         console.log(`[Daily Reset] 🔄 07:50 น. (${dateStr}): ล้างค่าวินาทีและพลังงานเป็น 0`);
         broadcastState();
     }
- 
+
     checkAutoSchedule(hours, minutes);
- 
-    // นับเวลาเฉพาะช่วงทำงาน + ESP32 ออนไลน์ + รีเลย์ ON
+
+    // นับเวลาเฉพาะช่วงทำงาน (08:00 - 16:00 น.) + ESP32 ออนไลน์ + รีเลย์ ON
     const isWorkingHours = totalMinutes >= 480 && totalMinutes < 960;
     let secondsChanged = false;
- 
+
     if (isWorkingHours && isHardwareOnline) {
         for (let i = 0; i < 4; i++) {
             if (relayStates[i] === true) {
@@ -162,72 +180,73 @@ setInterval(() => {
             }
         }
     }
- 
+
     if (secondsChanged) {
-        broadcastState(); // ส่งเฉพาะหน้าเว็บ ไม่ส่งให้ ESP32
+        broadcastState();
     }
 }, 1000);
- 
+
 // -------------------------------------------------------------------------
-// Heartbeat: ตัด socket ที่ค้างครึ่งๆ กลางๆ
+// Heartbeat: ตรวจจับและตัด Socket ค้างทุก 30 วินาที
 // -------------------------------------------------------------------------
 setInterval(() => {
     wss.clients.forEach((ws) => {
         if (ws.isAlive === false) {
-            console.log('[WS] ⏱️ ไม่มีการตอบสนอง ตัด socket ทิ้ง');
+            console.log('[WS] ⏱️ ไม่มีการตอบสนอง ตัด Socket ทิ้ง');
             return ws.terminate();
         }
         ws.isAlive = false;
         try { ws.ping(); } catch (e) { /* ignore */ }
     });
 }, HEARTBEAT_MS);
- 
+
 // -------------------------------------------------------------------------
-// WebSocket Handlers
+// WebSocket Server Handlers
 // -------------------------------------------------------------------------
 wss.on('connection', (ws) => {
     ws.isAlive = true;
     ws.on('pong', () => { ws.isAlive = true; });
- 
-    // หมายเหตุ: ไม่ส่งสถานะอัตโนมัติตอนเชื่อมต่อ
-    // - หน้าเว็บจะส่ง GET_STATE เอง
-    // - ESP32 จะได้รับสถานะหลังส่ง ESP_CONNECT (กันรีเลย์ถูกสั่งปิดผิดๆ ตอนต่อใหม่)
- 
+
     ws.on('message', (message) => {
         ws.isAlive = true;
         try {
             const data = JSON.parse(message);
- 
-            // ESP32 ยืนยันตัวตน
+
+            // เมื่อ ESP32 ยืนยันตัวตน
             if (data.type === 'ESP_CONNECT') {
                 const old = espClientSocket;
                 espClientSocket = ws;
-                if (old && old !== ws) old.terminate(); // ตัด socket เก่าของ ESP32
- 
-                if (offlineTimer) { clearTimeout(offlineTimer); offlineTimer = null; }
+                if (old && old !== ws) old.terminate(); // ตัด socket เก่าทิ้ง
+
+                if (offlineTimer) {
+                    clearTimeout(offlineTimer);
+                    offlineTimer = null;
+                }
                 isHardwareOnline = true;
                 lastRelaysSentToEsp = '';
                 console.log('[WS] 🟢 บอร์ด ESP32 ยืนยันตัวตนสำเร็จ');
- 
+
                 const thTime = getThaiTime();
                 checkAutoSchedule(thTime.getHours(), thTime.getMinutes());
-                syncRelaysToEsp(true);   // ส่งสถานะที่ต้องการให้ ESP32 ทำตาม
+                syncRelaysToEsp(true); // ซิงค์สถานะที่ต้องการให้ ESP32 ทำตามทันที
                 broadcastState();
                 return;
             }
- 
-            // ESP32 รายงานสถานะ: server เป็นผู้กำหนดสถานะ จึงไม่รับค่ามาทับ
+
+            // ESP32 รายงานสถานะ (Server เป็น Source of Truth จึงไม่รับค่ามาทับ)
             if (data.type === 'STATE_UPDATE') {
                 return;
             }
- 
+
+            // ตอบกลับสัญญาณ Application PING
             if (data.type === 'PING') {
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'PONG' }));
                 }
                 return;
             }
- 
+
+            // คำสั่งจาก Dashboard
             if (data.type === 'GET_STATE') {
                 ws.send(webPayload());
             }
@@ -259,33 +278,32 @@ wss.on('connection', (ws) => {
             console.error('[WS] JSON Parse Error:', err.message);
         }
     });
- 
+
     ws.on('close', () => {
         if (ws === espClientSocket) {
             espClientSocket = null;
             console.log(`[WS] 🟠 ESP32 หลุด รอ ${OFFLINE_GRACE_MS / 1000} วินาทีก่อนประกาศออฟไลน์`);
- 
-            // ไม่ล้าง relayStates: เก็บ "สถานะที่ต้องการ" ไว้ ป้องกันรีเลย์ปิด-เปิดรัวตอนเน็ตกระตุก
+
+            // หน่วงเวลาผ่อนผันก่อนประกาศออฟไลน์ ป้องกันการรีเซ็ตรีเลย์ตอนสัญญาณสะดุด
             if (offlineTimer) clearTimeout(offlineTimer);
             offlineTimer = setTimeout(() => {
                 offlineTimer = null;
                 if (!espClientSocket) {
                     isHardwareOnline = false;
-                    console.log('[WS] 🔴 ESP32 ออฟไลน์');
+                    console.log('[WS] 🔴 ESP32 ออฟไลน์จริง');
                     broadcastState();
                 }
             }, OFFLINE_GRACE_MS);
         }
     });
- 
+
     ws.on('error', (err) => {
         console.error('[WS] Error:', err.message);
     });
 });
- 
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Smart Office Server กำลังทำงานที่พอร์ต ${PORT}`);
     console.log(`🔌 WebSocket Endpoint: /esp`);
 });
- 
