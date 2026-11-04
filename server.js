@@ -1,189 +1,159 @@
+erver · JS
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
-
+ 
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: '/esp' });
-
-// สถานะ Relay ทั้ง 4 ช่อง [Air1, Air2, Air3, Relay4]
-let relayStates = [false, false, false, false];
+ 
+// -------------------------------------------------------------------------
+// สถานะหลัก (server คือ source of truth ของ "สถานะที่ต้องการ")
+// -------------------------------------------------------------------------
+let relayStates = [false, false, false, false]; // [Air1, Air2, Air3, Relay4]
 let autoMode = true;
-
-// ตัวแปรเวลานับสะสม (วินาที) ประจำวัน
 let deviceTotalSeconds = [0, 0, 0, 0];
 let lastAutoResetDate = '';
 let lastDailyResetDate = '';
-
-// การเชื่อมต่อฮาร์ดแวร์ทั้ง 2 บอร์ด
-let isHardwareOnline = false; // บอร์ดที่ 1 (Relay)
-let espRelaySocket = null;
-
-let isSolarOnline = false;    // บอร์ดที่ 2 (Solar Sensor)
-let espSolarSocket = null;
-
-// ตรรกะ Solar Cell สำหรับ Air 3 (53,000 BTU)
-let solarCurrent = 0.0;
-let solarThreshold = 15.0;         // เกณฑ์สั่งเปิด (แอมป์)
-const SOLAR_HYSTERESIS_OFF = 10.0; // เกณฑ์สั่งปิด (แอมป์)
-
-let solarAboveCounter = 0;
-let solarBelowCounter = 0;
-let air3MinRunTimer = 0;           // หน่วงเวลาเปิดขั้นต่ำ 10 นาที (ป้องกันเมฆบัง)
-let air3MinOffTimer = 0;           // หน่วงเวลาห้ามเปิดซ้ำ 3 นาที (ถนอมคอมเพรสเซอร์)
-
+ 
+let isHardwareOnline = false;
+let espClientSocket = null;
+let offlineTimer = null;
+let lastRelaysSentToEsp = '';
+ 
+const OFFLINE_GRACE_MS = 20000;  // ผ่อนผันก่อนประกาศว่า ESP32 ออฟไลน์
+const HEARTBEAT_MS = 30000;      // ping ตรวจ socket ค้างทุก 30 วินาที
+ 
 app.use(express.static(path.join(__dirname, 'public')));
-
-// ฟังก์ชันส่งกระจายข้อมูลสถานะไปยังทุกอุปกรณ์
-function broadcastState() {
-    const payload = JSON.stringify({
+app.get('/healthz', (req, res) => res.send('ok'));
+ 
+// -------------------------------------------------------------------------
+// Utilities
+// -------------------------------------------------------------------------
+function getThaiTime() {
+    const now = new Date();
+    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
+    return new Date(utc + 3600000 * 7); // UTC+7
+}
+ 
+// payload สำหรับหน้าเว็บ: ถ้า ESP32 ออฟไลน์ให้แสดงรีเลย์เป็น OFF ทั้งหมด
+function webPayload() {
+    return JSON.stringify({
         type: 'INIT_STATE',
-        relays: relayStates,
+        relays: isHardwareOnline ? relayStates : [false, false, false, false],
         autoMode: autoMode,
         deviceTotalSeconds: deviceTotalSeconds,
-        hardwareOnline: isHardwareOnline,
-        solarOnline: isSolarOnline,
-        solarCurrent: solarCurrent,
-        solarThreshold: solarThreshold
+        hardwareOnline: isHardwareOnline
     });
-
+}
+ 
+// ส่งให้หน้าเว็บทุกหน้า (ไม่ส่งให้ ESP32)
+function broadcastState() {
+    const payload = webPayload();
     wss.clients.forEach((client) => {
-        if (client.readyState === WebSocket.OPEN) {
+        if (client !== espClientSocket && client.readyState === WebSocket.OPEN) {
             client.send(payload);
         }
     });
 }
-
-// คำนวณตารางเวลาสลับแอร์และเงื่อนไข Solar
+ 
+// ส่งคำสั่งรีเลย์ให้ ESP32 เฉพาะตอนค่าเปลี่ยน (ข้อความเล็ก)
+function syncRelaysToEsp(force = false) {
+    if (!espClientSocket || espClientSocket.readyState !== WebSocket.OPEN) return;
+    const msg = JSON.stringify({ type: 'RELAYS', relays: relayStates });
+    if (!force && msg === lastRelaysSentToEsp) return;
+    lastRelaysSentToEsp = msg;
+    espClientSocket.send(msg);
+}
+ 
+// -------------------------------------------------------------------------
+// ตารางเวลาสลับแอร์ (08:00 - 16:00 น.)
+// -------------------------------------------------------------------------
 function checkAutoSchedule(hours, minutes) {
     if (!autoMode) return;
-
-    if (!isHardwareOnline) {
-        const wasOn = relayStates.some(state => state === true);
-        if (wasOn) {
-            relayStates = [false, false, false, false];
-            broadcastState();
-        }
-        return;
-    }
-
+ 
     const totalMinutes = hours * 60 + minutes;
-    const isWorkingHours = totalMinutes >= 480 && totalMinutes < 960; // 08:00 - 16:00 น.
-
-    if (!isWorkingHours) {
-        let changed = false;
-        for (let i = 0; i < 3; i++) {
-            if (relayStates[i] !== false) {
-                relayStates[i] = false;
-                changed = true;
-            }
-        }
-        if (changed) broadcastState();
-        return;
-    }
-
-    // 1. ตารางสลับ Air 1 และ Air 2
     let air1 = false;
     let air2 = false;
-
-    if (totalMinutes >= 480 && totalMinutes < 510) {          // 08:00 - 08:30
+    let air3 = false;
+ 
+    if (totalMinutes >= 480 && totalMinutes < 510) {          // 08:00 - 08:30 [Air1]
         air1 = true;
-    } else if (totalMinutes >= 510 && totalMinutes < 540) {   // 08:30 - 09:00
+    } else if (totalMinutes >= 510 && totalMinutes < 540) {   // 08:30 - 09:00 [Air2]
         air2 = true;
-    } else if (totalMinutes >= 540 && totalMinutes < 570) {   // 09:00 - 09:30
+    } else if (totalMinutes >= 540 && totalMinutes < 570) {   // 09:00 - 09:30 [Air1]
         air1 = true;
-    } else if (totalMinutes >= 570 && totalMinutes < 600) {   // 09:30 - 10:00
+    } else if (totalMinutes >= 570 && totalMinutes < 600) {   // 09:30 - 10:00 [Air2]
         air2 = true;
-    } else if (totalMinutes >= 600 && totalMinutes < 630) {   // 10:00 - 10:30
+    } else if (totalMinutes >= 600 && totalMinutes < 630) {   // 10:00 - 10:30 [Air1]
         air1 = true;
     } else if (totalMinutes >= 630 && totalMinutes < 660) {   // 10:30 - 11:00 [Air1, Air2]
         air1 = true; air2 = true;
-    } else if (totalMinutes >= 660 && totalMinutes < 720) {   // 11:00 - 12:00
-        air1 = true; air2 = true;
-    } else if (totalMinutes >= 720 && totalMinutes < 840) {   // 12:00 - 14:00
-        air2 = true;
+    } else if (totalMinutes >= 660 && totalMinutes < 690) {   // 11:00 - 11:30 [Air2, Air3]
+        air2 = true; air3 = true;
+    } else if (totalMinutes >= 690 && totalMinutes < 720) {   // 11:30 - 12:00 [Air1, Air3]
+        air1 = true; air3 = true;
+    } else if (totalMinutes >= 720 && totalMinutes < 750) {   // 12:00 - 12:30 [Air2, Air3]
+        air2 = true; air3 = true;
+    } else if (totalMinutes >= 750 && totalMinutes < 840) {   // 12:30 - 14:00 [Air2, Air3]
+        air2 = true; air3 = true;
     } else if (totalMinutes >= 840 && totalMinutes < 870) {   // 14:00 - 14:30 [Air1, Air2]
         air1 = true; air2 = true;
-    } else if (totalMinutes >= 870 && totalMinutes < 930) {   // 14:30 - 15:30
-        air2 = true;
-    } else if (totalMinutes >= 930 && totalMinutes < 960) {   // 15:30 - 16:00
+    } else if (totalMinutes >= 870 && totalMinutes < 900) {   // 14:30 - 15:00 [Air3]
+        air3 = true;
+    } else if (totalMinutes >= 900 && totalMinutes < 930) {   // 15:00 - 15:30 [Air2, Air3]
+        air2 = true; air3 = true;
+    } else if (totalMinutes >= 930 && totalMinutes < 960) {   // 15:30 - 16:00 [Air1]
         air1 = true;
     }
-
-    // 2. ควบคุม Air 3 ตามกระแส Solar
-    let air3 = relayStates[2];
-
-    if (isSolarOnline && solarAboveCounter >= 45 && !air3 && air3MinOffTimer === 0) {
-        air3 = true;
-        air3MinRunTimer = 600; // ล็อกให้แอร์ทำงานอย่างน้อย 10 นาที
-        console.log(`[Solar] ☀️ กระแสโซลาร์ถึงเกณฑ์ (${solarCurrent} A) สั่งเปิด Air 3`);
-    } else if (air3 && (solarBelowCounter >= 120 || !isSolarOnline) && air3MinRunTimer === 0) {
-        air3 = false;
-        air3MinOffTimer = 180; // พักคอมเพรสเซอร์อย่างน้อย 3 นาที
-        console.log(`[Solar] ☁️ กระแสโซลาร์ไม่พอ (${solarCurrent} A) สั่งปิด Air 3`);
-    }
-
+ 
     let isChanged = false;
     if (relayStates[0] !== air1) { relayStates[0] = air1; isChanged = true; }
     if (relayStates[1] !== air2) { relayStates[1] = air2; isChanged = true; }
     if (relayStates[2] !== air3) { relayStates[2] = air3; isChanged = true; }
-
+ 
     if (isChanged) {
-        console.log(`[Schedule] สลับสถานะ: Air1=${air1}, Air2=${air2}, Air3=${air3}`);
+        console.log(`[Auto Schedule] สลับสถานะ: Air1=${air1}, Air2=${air2}, Air3=${air3}`);
+        syncRelaysToEsp();
         broadcastState();
     }
 }
-
+ 
+// -------------------------------------------------------------------------
 // Master Loop ทุก 1 วินาที
+// -------------------------------------------------------------------------
 setInterval(() => {
-    const now = new Date();
-    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-    const thTime = new Date(utc + (3600000 * 7)); // UTC+7
-
+    const thTime = getThaiTime();
     const hours = thTime.getHours();
     const minutes = thTime.getMinutes();
     const totalMinutes = hours * 60 + minutes;
     const dateStr = `${thTime.getFullYear()}-${thTime.getMonth() + 1}-${thTime.getDate()}`;
-
-    if (air3MinRunTimer > 0) air3MinRunTimer--;
-    if (air3MinOffTimer > 0) air3MinOffTimer--;
-
-    // ตรวจจับแดดสะสม
-    if (isSolarOnline && solarCurrent >= solarThreshold) {
-        solarAboveCounter++;
-        solarBelowCounter = 0;
-    } else if (isSolarOnline && solarCurrent < SOLAR_HYSTERESIS_OFF) {
-        solarBelowCounter++;
-        solarAboveCounter = 0;
-    } else {
-        solarAboveCounter = 0;
-    }
-
-    // 07:45 น. บังคับเปิด Auto
+ 
+    // 07:45 น. บังคับเปิดโหมด Auto
     if (hours === 7 && minutes === 45 && lastAutoResetDate !== dateStr) {
         lastAutoResetDate = dateStr;
         if (!autoMode) {
             autoMode = true;
-            console.log(`[Auto Schedule] ⏰ 07:45 น. (${dateStr}): รีเซ็ตเปิดโหมด Auto`);
+            console.log(`[Auto Schedule] ⏰ 07:45 น. (${dateStr}): เปิดโหมด Auto ประจำวัน`);
             broadcastState();
         }
     }
-
-    // 07:50 น. รีเซ็ตเวลาและพลังงานเป็น 0
+ 
+    // 07:50 น. รีเซ็ตเวลานับสะสม
     if (hours === 7 && minutes === 50 && lastDailyResetDate !== dateStr) {
         lastDailyResetDate = dateStr;
         deviceTotalSeconds = [0, 0, 0, 0];
         console.log(`[Daily Reset] 🔄 07:50 น. (${dateStr}): ล้างค่าวินาทีและพลังงานเป็น 0`);
         broadcastState();
     }
-
+ 
     checkAutoSchedule(hours, minutes);
-
-    // บันทึกเวลาสะสม
+ 
+    // นับเวลาเฉพาะช่วงทำงาน + ESP32 ออนไลน์ + รีเลย์ ON
     const isWorkingHours = totalMinutes >= 480 && totalMinutes < 960;
     let secondsChanged = false;
-
+ 
     if (isWorkingHours && isHardwareOnline) {
         for (let i = 0; i < 4; i++) {
             if (relayStates[i] === true) {
@@ -192,130 +162,130 @@ setInterval(() => {
             }
         }
     }
-
-    if (secondsChanged) broadcastState();
+ 
+    if (secondsChanged) {
+        broadcastState(); // ส่งเฉพาะหน้าเว็บ ไม่ส่งให้ ESP32
+    }
 }, 1000);
-
+ 
+// -------------------------------------------------------------------------
+// Heartbeat: ตัด socket ที่ค้างครึ่งๆ กลางๆ
+// -------------------------------------------------------------------------
+setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            console.log('[WS] ⏱️ ไม่มีการตอบสนอง ตัด socket ทิ้ง');
+            return ws.terminate();
+        }
+        ws.isAlive = false;
+        try { ws.ping(); } catch (e) { /* ignore */ }
+    });
+}, HEARTBEAT_MS);
+ 
+// -------------------------------------------------------------------------
 // WebSocket Handlers
-wss.on('connection', (ws, req) => {
-    ws.send(JSON.stringify({
-        type: 'INIT_STATE',
-        relays: relayStates,
-        autoMode: autoMode,
-        deviceTotalSeconds: deviceTotalSeconds,
-        hardwareOnline: isHardwareOnline,
-        solarOnline: isSolarOnline,
-        solarCurrent: solarCurrent,
-        solarThreshold: solarThreshold
-    }));
-
+// -------------------------------------------------------------------------
+wss.on('connection', (ws) => {
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+ 
+    // หมายเหตุ: ไม่ส่งสถานะอัตโนมัติตอนเชื่อมต่อ
+    // - หน้าเว็บจะส่ง GET_STATE เอง
+    // - ESP32 จะได้รับสถานะหลังส่ง ESP_CONNECT (กันรีเลย์ถูกสั่งปิดผิดๆ ตอนต่อใหม่)
+ 
     ws.on('message', (message) => {
+        ws.isAlive = true;
         try {
             const data = JSON.parse(message);
-
-            // บอร์ดที่ 1 (Relay Board)
-            if (data.type === 'ESP_CONNECT' || data.type === 'STATE_UPDATE') {
-                espRelaySocket = ws;
+ 
+            // ESP32 ยืนยันตัวตน
+            if (data.type === 'ESP_CONNECT') {
+                const old = espClientSocket;
+                espClientSocket = ws;
+                if (old && old !== ws) old.terminate(); // ตัด socket เก่าของ ESP32
+ 
+                if (offlineTimer) { clearTimeout(offlineTimer); offlineTimer = null; }
                 isHardwareOnline = true;
-                console.log(`[WS] 🟢 บอร์ดที่ 1 (Relay) ออนไลน์ (${data.type})`);
-
-                if (Array.isArray(data.relays) && data.relays.length === 4) {
-                    relayStates = data.relays;
-                }
-
-                const now = new Date();
-                const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-                const thTime = new Date(utc + (3600000 * 7));
+                lastRelaysSentToEsp = '';
+                console.log('[WS] 🟢 บอร์ด ESP32 ยืนยันตัวตนสำเร็จ');
+ 
+                const thTime = getThaiTime();
                 checkAutoSchedule(thTime.getHours(), thTime.getMinutes());
+                syncRelaysToEsp(true);   // ส่งสถานะที่ต้องการให้ ESP32 ทำตาม
                 broadcastState();
                 return;
             }
-
-            // บอร์ดที่ 2 (Solar Sensor)
-            if (data.type === 'SOLAR_BOARD_CONNECT') {
-                espSolarSocket = ws;
-                isSolarOnline = true;
-                console.log(`[WS] ☀️ บอร์ดที่ 2 (Solar) ออนไลน์`);
-                broadcastState();
+ 
+            // ESP32 รายงานสถานะ: server เป็นผู้กำหนดสถานะ จึงไม่รับค่ามาทับ
+            if (data.type === 'STATE_UPDATE') {
                 return;
             }
-
-            if (data.type === 'SOLAR_DATA') {
-                espSolarSocket = ws;
-                isSolarOnline = true;
-                if (typeof data.current === 'number') {
-                    solarCurrent = data.current;
-                }
-                broadcastState();
-                return;
-            }
-
-            // สัญญาณเลี้ยงสาย
+ 
             if (data.type === 'PING') {
                 if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ type: 'PONG' }));
                 }
                 return;
             }
-
-            // สั่งการจาก Dashboard
+ 
             if (data.type === 'GET_STATE') {
-                broadcastState();
-            } else if (data.type === 'CONTROL') {
-                const { ch, state } = data;
-                if (ch >= 0 && ch < 4) {
-                    relayStates[ch] = state;
-                    broadcastState();
-                }
-            } else if (data.type === 'CONTROL_ALL') {
-                for (let i = 0; i < 4; i++) {
-                    relayStates[i] = data.state;
-                }
-                broadcastState();
-            } else if (data.type === 'TOGGLE_AUTO') {
-                autoMode = Boolean(data.state);
-                console.log(`[Auto Schedule] สลับโหมด Auto: ${autoMode ? 'เปิด' : 'ปิด'}`);
-                if (autoMode) {
-                    const now = new Date();
-                    const utc = now.getTime() + (now.getTimezoneOffset() * 60000);
-                    const thTime = new Date(utc + (3600000 * 7));
-                    checkAutoSchedule(thTime.getHours(), thTime.getMinutes());
-                }
-                broadcastState();
-            } else if (data.type === 'SET_SOLAR_THRESHOLD') {
-                if (typeof data.threshold === 'number' && data.threshold > 0) {
-                    solarThreshold = data.threshold;
-                    console.log(`[Solar] เกณฑ์กระแสใหม่ Air 3: ${solarThreshold} A`);
+                ws.send(webPayload());
+            }
+            else if (data.type === 'CONTROL') {
+                const ch = Number(data.ch);
+                if (Number.isInteger(ch) && ch >= 0 && ch < 4) {
+                    relayStates[ch] = Boolean(data.state);
+                    syncRelaysToEsp();
                     broadcastState();
                 }
             }
+            else if (data.type === 'CONTROL_ALL') {
+                for (let i = 0; i < 4; i++) {
+                    relayStates[i] = Boolean(data.state);
+                }
+                syncRelaysToEsp();
+                broadcastState();
+            }
+            else if (data.type === 'TOGGLE_AUTO') {
+                autoMode = Boolean(data.state);
+                console.log(`[Auto Schedule] สลับโหมด Auto: ${autoMode ? 'เปิด' : 'ปิด'}`);
+                if (autoMode) {
+                    const thTime = getThaiTime();
+                    checkAutoSchedule(thTime.getHours(), thTime.getMinutes());
+                }
+                broadcastState();
+            }
         } catch (err) {
-            console.error('[WS] Parse Error:', err.message);
+            console.error('[WS] JSON Parse Error:', err.message);
         }
     });
-
+ 
     ws.on('close', () => {
-        if (ws === espRelaySocket) {
-            espRelaySocket = null;
-            isHardwareOnline = false;
-            console.log('[WS] 🔴 บอร์ดที่ 1 (Relay) หลุดการเชื่อมต่อ');
-            relayStates = [false, false, false, false];
-            broadcastState();
-        } else if (ws === espSolarSocket) {
-            espSolarSocket = null;
-            isSolarOnline = false;
-            solarCurrent = 0.0;
-            console.log('[WS] ☁️ บอร์ดที่ 2 (Solar) หลุดการเชื่อมต่อ');
-            broadcastState();
+        if (ws === espClientSocket) {
+            espClientSocket = null;
+            console.log(`[WS] 🟠 ESP32 หลุด รอ ${OFFLINE_GRACE_MS / 1000} วินาทีก่อนประกาศออฟไลน์`);
+ 
+            // ไม่ล้าง relayStates: เก็บ "สถานะที่ต้องการ" ไว้ ป้องกันรีเลย์ปิด-เปิดรัวตอนเน็ตกระตุก
+            if (offlineTimer) clearTimeout(offlineTimer);
+            offlineTimer = setTimeout(() => {
+                offlineTimer = null;
+                if (!espClientSocket) {
+                    isHardwareOnline = false;
+                    console.log('[WS] 🔴 ESP32 ออฟไลน์');
+                    broadcastState();
+                }
+            }, OFFLINE_GRACE_MS);
         }
     });
-
+ 
     ws.on('error', (err) => {
         console.error('[WS] Error:', err.message);
     });
 });
-
+ 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`🚀 Smart Office Server กำลังทำงานที่พอร์ต ${PORT}`);
+    console.log(`🔌 WebSocket Endpoint: /esp`);
 });
+ 
