@@ -1,4 +1,3 @@
-HTML
 <!DOCTYPE html>
 <html lang="th">
 <head>
@@ -69,7 +68,7 @@ HTML
 <body class="font-sans antialiased flex justify-center p-3 sm:p-6 selection:bg-sky-500 selection:text-white">
 
   <div class="w-full max-w-md flex flex-col gap-4 pb-12">
-    
+
     <!-- ส่วนหัว (Header) -->
     <header class="glass-card rounded-2xl p-4 flex items-center justify-between border-t border-white/15">
       <div class="flex items-center gap-3">
@@ -83,7 +82,7 @@ HTML
           <p class="text-xs text-slate-400 font-light">CONTROLLER SYSTEM</p>
         </div>
       </div>
-      
+
       <!-- ป้ายสถานะฮาร์ดแวร์จริง -->
       <div id="statusBadge" class="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-rose-500/10 text-rose-400 border border-rose-500/20">
         <span class="w-2 h-2 rounded-full bg-rose-400"></span>
@@ -109,42 +108,6 @@ HTML
         <div>
           <div class="text-[10px] text-slate-400">กำลังเปิดทำงาน</div>
           <div id="activeCount" class="text-xs font-semibold text-emerald-400">0 / 4 เครื่อง</div>
-        </div>
-      </div>
-    </div>
-
-    <!-- แผง Solar Cell Monitor (ควบคุม Air 3) -->
-    <div class="glass-card rounded-2xl p-4 border border-amber-500/30 relative overflow-hidden bg-gradient-to-r from-amber-950/20 to-slate-800/40">
-      <div class="flex items-center justify-between mb-3">
-        <div class="flex items-center gap-2.5">
-          <div class="w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center text-amber-400 text-sm">
-            <i class="fa-solid fa-solar-panel"></i>
-          </div>
-          <div>
-            <h2 class="text-xs font-semibold text-amber-200">ระบบพลังงาน Solar Cell (บอร์ดที่ 2)</h2>
-            <p class="text-[10px] text-slate-400">เงื่อนไขจ่ายไฟ Air 3 (53,000 BTU)</p>
-          </div>
-        </div>
-        <span id="solarBadge" class="text-[10px] px-2 py-0.5 rounded-md font-bold uppercase tracking-wider bg-slate-800 text-slate-500">
-          SOLAR OFF
-        </span>
-      </div>
-
-      <div class="grid grid-cols-2 gap-2 mt-2 pt-2 border-t border-white/5">
-        <div class="bg-slate-800/60 rounded-xl p-2.5 border border-slate-700/50 text-center">
-          <div class="text-[10px] text-slate-400 mb-0.5">กระแสปัจจุบัน</div>
-          <div class="text-base font-bold text-amber-400 font-mono tracking-wide">
-            <span id="solarCurrentText">0.00</span> <span class="text-xs font-normal text-slate-400">A</span>
-          </div>
-        </div>
-        <div class="bg-slate-800/60 rounded-xl p-2.5 border border-slate-700/50 flex flex-col justify-between">
-          <div class="text-[10px] text-slate-400 mb-0.5 text-center">เกณฑ์เปิด Air 3</div>
-          <div class="flex items-center justify-center gap-1.5">
-            <input type="number" id="thresholdInput" step="0.5" min="1" max="100" class="w-14 bg-slate-900 border border-slate-600 rounded px-1.5 py-0.5 text-center text-amber-300 font-bold text-xs focus:outline-none focus:border-amber-400" value="15.0">
-            <button onclick="setSolarThreshold()" class="bg-amber-600 hover:bg-amber-500 text-white text-[10px] px-2 py-1 rounded font-medium transition shadow">
-              ตั้งค่า
-            </button>
-          </div>
         </div>
       </div>
     </div>
@@ -195,33 +158,33 @@ HTML
     let socket = null;
 
     const devices = [
-      { 
-        name: "Air Conditioner 1", 
-        desc: "25,000 Btu. 1 เฟส อาคารรับสมัคร", 
-        icon: "fa-snowflake", 
-        trackTime: true, 
-        multiplier: 2.0 
+      {
+        name: "Air Conditioner 1",
+        desc: "25,000 Btu. 1 เฟส อาคารรับสมัคร",
+        icon: "fa-snowflake",
+        trackTime: true,
+        multiplier: 2.0
       },
-      { 
-        name: "Air Conditioner 2", 
-        desc: "25,000 Btu. 1 เฟส อาคารรับสมัคร", 
-        icon: "fa-snowflake", 
-        trackTime: true, 
-        multiplier: 2.0 
+      {
+        name: "Air Conditioner 2",
+        desc: "25,000 Btu. 1 เฟส อาคารรับสมัคร",
+        icon: "fa-snowflake",
+        trackTime: true,
+        multiplier: 2.0
       },
-      { 
-        name: "Air Conditioner 3", 
-        desc: "53,000 Btu. 3 เฟส (Solar Cell Link)", 
-        icon: "fa-snowflake", 
-        trackTime: true, 
-        multiplier: 4.5 
+      {
+        name: "Air Conditioner 3",
+        desc: "53,000 Btu. 3 เฟส อาคารรับสมัคร",
+        icon: "fa-snowflake",
+        trackTime: true,
+        multiplier: 4.5
       },
-      { 
-        name: "Office Ventilation / Light", 
-        desc: "ระบบระบายอากาศ & ปั๊มน้ำ", 
-        icon: "fa-fan", 
-        trackTime: false, 
-        multiplier: 0.0 
+      {
+        name: "Office Ventilation / Light",
+        desc: "ระบบระบายอากาศ & ปั๊มน้ำ",
+        icon: "fa-fan",
+        trackTime: false,
+        multiplier: 0.0
       }
     ];
 
@@ -271,12 +234,12 @@ HTML
       devices.forEach((dev, idx) => {
         const isOn = relayStates[idx];
         if (isOn) activeCount++;
-        
+
         const stats = getDeviceStats(idx);
 
         const card = document.createElement('div');
         card.className = `glass-card rounded-2xl p-4 transition-all duration-300 relative ${isOn ? 'border-sky-500/40 glow-cyan' : 'border-white/5 opacity-85'}`;
-        
+
         card.innerHTML = `
           <div class="flex items-center justify-between">
             <div class="flex items-center gap-3.5">
@@ -299,7 +262,7 @@ HTML
               <label for="switch_${idx}" class="toggle-label block overflow-hidden h-6 rounded-full bg-slate-700 cursor-pointer transition-colors duration-200"></label>
             </div>
           </div>
-          
+
           ${dev.trackTime ? `
             <div class="mt-4 pt-3 border-t border-white/10 grid grid-cols-2 gap-3 text-center">
               <div class="bg-slate-800/40 rounded-lg p-2.5 border border-slate-700/50">
@@ -323,6 +286,7 @@ HTML
       document.getElementById('activeCount').textContent = `${activeCount} / ${devices.length} เครื่อง`;
     }
 
+    // อัปเดตป้ายสถานะ โดยเช็กทั้ง Server และฮาร์ดแวร์ ESP32
     function updateBadge(wsConnected, hardwareOnline) {
       const badge = document.getElementById('statusBadge');
       const text = document.getElementById('statusText');
@@ -339,25 +303,6 @@ HTML
         badge.className = "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20";
         badge.firstElementChild.className = "w-2 h-2 rounded-full bg-amber-400";
         text.textContent = "ESP32 ออฟไลน์";
-      }
-    }
-
-    function updateSolarUI(solarOnline, current, threshold) {
-      const sBadge = document.getElementById('solarBadge');
-      const sCurrent = document.getElementById('solarCurrentText');
-      const sThreshInput = document.getElementById('thresholdInput');
-
-      if (solarOnline) {
-        sBadge.className = "text-[10px] px-2 py-0.5 rounded-md font-bold uppercase tracking-wider bg-amber-500/20 text-amber-300 border border-amber-500/30 animate-pulse";
-        sBadge.textContent = "SOLAR ONLINE";
-      } else {
-        sBadge.className = "text-[10px] px-2 py-0.5 rounded-md font-bold uppercase tracking-wider bg-slate-800 text-slate-500";
-        sBadge.textContent = "SOLAR OFF";
-      }
-
-      sCurrent.textContent = (current || 0).toFixed(2);
-      if (document.activeElement !== sThreshInput && typeof threshold === 'number') {
-        sThreshInput.value = threshold.toFixed(1);
       }
     }
 
@@ -378,9 +323,6 @@ HTML
             } else {
               updateBadge(true, false);
             }
-
-            // อัปเดตข้อมูล Solar
-            updateSolarUI(Boolean(data.solarOnline), data.solarCurrent, data.solarThreshold);
 
             if (typeof data.autoMode === 'boolean') {
               document.getElementById('scheduleToggle').checked = data.autoMode;
@@ -405,7 +347,6 @@ HTML
 
         socket.onclose = () => {
           updateBadge(false, false);
-          updateSolarUI(false, 0.0, 15.0);
           setTimeout(initWebSocket, 3000);
         };
 
@@ -429,13 +370,6 @@ HTML
     function controlAll(state) {
       if (socket && socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify({ type: "CONTROL_ALL", state: state }));
-      }
-    }
-
-    function setSolarThreshold() {
-      const val = parseFloat(document.getElementById('thresholdInput').value);
-      if (!isNaN(val) && val > 0 && socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: "SET_SOLAR_THRESHOLD", threshold: val }));
       }
     }
 
